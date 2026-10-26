@@ -15,7 +15,7 @@ from src.config import (
     SGS_SERIES,
     SIDRA_TABLES,
 )
-from src.agent.ui import render_agent_tab
+from src.agent.ui import open_agent, render_agent_tab, sidebar_agent_button
 from src.ingestion.bcb_client import get_bcb_series
 from src.ingestion.cache import FetchResult
 from src.ingestion.http_client import build_session
@@ -101,6 +101,7 @@ def sinesp_badge(res: FetchResult) -> str:
 with st.sidebar:
     st.markdown("### 🇧🇷 Monitor Brasil")
     st.caption("Painel público, didático e auditável.")
+    agent_clicked = sidebar_agent_button()
     period_label = st.selectbox("Período de análise", list(PERIOD_OPTIONS), index=2)
     show_events = st.toggle("Mostrar eventos históricos", value=True,
                             help="Pandemia, ciclo de juros, transição de mandato e eleições.")
@@ -145,6 +146,9 @@ with st.sidebar:
             st.error(f"Não foi possível ler a planilha: {exc}")
     st.divider()
     st.caption("Fontes: Banco Central (SGS), IBGE (SIDRA), Ministério da Justiça (Sinesp VDE), INEP.")
+
+if agent_clicked:
+    open_agent(data)
 
 option = PERIOD_OPTIONS[period_label]
 start = period_start(option)
