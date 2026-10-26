@@ -91,13 +91,16 @@ def test_consolidated_fallback_is_created_and_valid(tmp_path):
 
 
 def sample_sinesp() -> pd.DataFrame:
-    return pd.DataFrame({
-        "UF": ["SP", "SP", "BA", "BA"],
-        "Município": ["a", "b", "c", "d"],
-        "Evento": ["Homicídio doloso", "Feminicídio", "Latrocínio", "Estupro de vulnerável"],
-        "Mês/Ano": ["01/2024", "02/2024", "03/2024", "04/2024"],
-        "Total Vítimas": [100, 5, 10, 40],
-    })
+    """Um ano completo (12 meses) com as colunas reais do Sinesp VDE (``total_vitima`` no singular)."""
+    rows = []
+    for m in range(1, 13):
+        stamp = pd.Timestamp(2024, m, 1)
+        rows += [
+            ("SP", "a", "Homicídio doloso", stamp, 10), ("SP", "b", "Feminicídio", stamp, 1),
+            ("BA", "c", "Roubo seguido de morte (latrocínio)", stamp, 1),
+            ("BA", "d", "Estupro de vulnerável", stamp, 40), ("BA", "e", "Tentativa de homicídio", stamp, 99),
+        ]
+    return pd.DataFrame(rows, columns=["UF", "Município", "Evento", "data_referencia", "total_vitima"])
 
 
 def test_standardize_and_indicators():
@@ -105,8 +108,8 @@ def test_standardize_and_indicators():
     assert list(std.columns) == ["uf", "municipio", "evento", "mes_ano", "total_vitimas"]
     ind = sinesp_to_indicators(std)
     br_mvi = ind[(ind.indicador == "mvi_total") & (ind.uf == "BR")]["valor"].iloc[0]
-    assert br_mvi == 110
-    assert ind[(ind.indicador == "mvi_taxa") & (ind.uf == "SP")]["valor"].iloc[0] == pytest.approx(100 / 44_411_238 * 1e5)
+    assert br_mvi == 12 * 11  # tentativa de homicídio não entra no MVI
+    assert ind[(ind.indicador == "mvi_taxa") & (ind.uf == "SP")]["valor"].iloc[0] == pytest.approx(120 / 44_411_238 * 1e5)
     assert (ind["qualidade"] == "oficial").all()
 
 
@@ -124,3 +127,98 @@ def test_upload_overrides_consolidated(tmp_path):
 def test_standardize_rejects_bad_sheet():
     with pytest.raises(ValueError):
         standardize_sinesp(pd.DataFrame({"x": [1]}))
+
+
+def test_incomplete_year_is_dropped():
+    df = sample_sinesp()
+    df = df[df["data_referencia"].dt.month <= 6]
+    assert sinesp_to_indicators(standardize_sinesp(df)).empty
+
+
+def test_excel_serial_dates_and_year_only():
+    df = pd.DataFrame({"uf": ["SP", "SP"], "evento": ["Homicídio doloso"] * 2, "mes_ano": [45292, 45323],
+                       "total_vitimas": [1, 2]})
+    std = standardize_sinesp(df)
+    assert std["mes_ano"].tolist() == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-02-01")]
+    assert standardize_sinesp(df.assign(mes_ano=[2023, 2023]))["mes_ano"].dt.year.tolist() == [2023, 2023]
+
+
+# --- download do Sinesp VDE (sem rede: sessão falsa) ------------------------------------------------------------
+import io  # noqa: E402
+
+from src.ingestion.http_client import IngestionError as _IngErr  # noqa: E402
+from src.ingestion.sinesp_download import aggregate_vde, download_year, sync_sinesp_vde  # noqa: E402
+
+
+class _Resp:
+    def __init__(self, status: int, body: bytes = b""):
+        self.status_code, self._body = status, body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def iter_content(self, chunk_size: int):
+        yield self._body
+
+
+class _Session:
+    def __init__(self, bodies: dict[int, tuple[int, bytes]]):
+        self.bodies, self.headers_seen = bodies, []
+
+    def get(self, url, headers=None, **kw):
+        self.headers_seen.append(headers)
+        year = int(url.rsplit("-", 1)[1].split(".")[0])
+        return _Resp(*self.bodies.get(year, (404, b"")))
+
+
+def _xlsx_bytes(year: int) -> bytes:
+    df = sample_sinesp().assign(data_referencia=lambda d: d["data_referencia"].apply(lambda t: t.replace(year=year)))
+    df = df.rename(columns={"UF": "uf", "Município": "municipio", "Evento": "evento"})
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl")
+    return buf.getvalue()
+
+
+def test_download_rejects_404_and_non_xlsx(tmp_path):
+    with pytest.raises(_IngErr, match="404"):
+        download_year(2030, tmp_path / "x.xlsx", _Session({}))
+    with pytest.raises(_IngErr, match="xlsx"):
+        download_year(2024, tmp_path / "y.xlsx", _Session({2024: (200, b"<html>erro</html>")}))
+
+
+def test_sync_sinesp_downloads_aggregates_and_caches(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.ingestion.sinesp_download.read_vde_xlsx", lambda p: pd.read_excel(p, engine="openpyxl"))
+    sess = _Session({2023: (200, _xlsx_bytes(2023)), 2024: (200, _xlsx_bytes(2024))})
+    rep = sync_sinesp_vde([2023, 2024, 2030], base=tmp_path, session=sess)
+    assert [y.status for y in rep.years] == ["baixado", "baixado", "indisponível"]
+    assert rep.combined_rows > 0 and (tmp_path / "sinesp_vde.parquet").exists()
+    assert "Referer" in sess.headers_seen[0] and "Mozilla" in sess.headers_seen[0]["User-Agent"]
+    assert "Tentativa de homicídio" not in set(pd.read_parquet(tmp_path / "sinesp_vde.parquet")["evento"])
+    again = sync_sinesp_vde([2023, 2024], base=tmp_path, session=_Session({}))
+    assert [y.status for y in again.years] == ["cache", "cache"]  # anos fechados não são rebaixados
+
+
+def test_aggregate_requires_event_column():
+    with pytest.raises(_IngErr):
+        aggregate_vde(pd.DataFrame({"x": [1]}))
+
+
+def test_iso_and_br_text_dates_parse_correctly():
+    iso = standardize_sinesp(pd.DataFrame({"uf": ["SP"], "evento": ["Feminicídio"], "mes_ano": ["2024-02-01"], "total_vitimas": [1]}))
+    assert iso["mes_ano"].iloc[0] == pd.Timestamp("2024-02-01")
+    br = standardize_sinesp(pd.DataFrame({"uf": ["SP"], "evento": ["Feminicídio"], "mes_ano": ["03/2024"], "total_vitimas": [1]}))
+    assert br["mes_ano"].iloc[0] == pd.Timestamp("2024-03-01")
+
+
+def test_traffic_deaths_are_not_homicides():
+    """Regressão: 'Morte no trânsito (exceto homicídio doloso)' continha o texto 'homicídio doloso'."""
+    from src.ingestion.sinesp_loader import _event_class
+    assert _event_class("Morte no trânsito ou em decorrência dele (exceto homicídio doloso)") is None
+    assert _event_class("Tentativa de homicídio") is None and _event_class("Estupro") is None
+    assert _event_class("Homicídio doloso") == "mvi_total"
+    assert _event_class("Morte por intervenção de Agente do Estado") == "mvi_total"
+    assert _event_class("Roubo seguido de morte (latrocínio)") == "mvi_total"
+    assert _event_class("Morte de Agente do Estado") is None

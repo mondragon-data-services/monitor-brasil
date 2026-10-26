@@ -2,6 +2,8 @@
 
 Uso:  python scripts/sync_data.py            # baixa BCB, IBGE, Ipeadata e monta segurança/educação
       python scripts/sync_data.py --no-ipea  # pula o Ipeadata
+      python scripts/sync_data.py --sinesp   # baixa as planilhas oficiais do Sinesp VDE (~25 MB/ano)
+      python scripts/sync_data.py --sinesp --sinesp-years 2024 2025 --force-sinesp
 Código de saída: 0 se todas as fontes essenciais (BCB + IBGE) têm dados; 1 caso contrário.
 """
 from __future__ import annotations
@@ -23,11 +25,23 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-ipea", action="store_true", help="não consulta o Ipeadata")
+    parser.add_argument("--sinesp", action="store_true", help="baixa e processa o Sinesp VDE oficial (gov.br)")
+    parser.add_argument("--sinesp-years", type=int, nargs="+", metavar="ANO", help="anos do Sinesp (padrão: todos)")
+    parser.add_argument("--force-sinesp", action="store_true", help="rebaixa mesmo anos já em cache")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.ERROR, format="%(levelname)s %(message)s")
 
     DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+    if args.sinesp:
+        from src.ingestion.sinesp_download import sync_sinesp_vde  # import tardio: puxa o leitor de planilhas
+
+        report = sync_sinesp_vde(args.sinesp_years, force=args.force_sinesp,
+                                 progress=lambda msg, frac: print(f"[{frac:4.0%}] {msg}", flush=True))
+        print(f"\n{'ano':<6}{'status':<14}{'linhas':>7}  detalhe")
+        for y in report.years:
+            print(f"{y.year:<6}{y.status:<14}{y.rows:>7}  {y.detail}")
+        print(f"Sinesp VDE combinado: {report.combined_rows} linhas\n")
     results = sync_all(include_ipea=not args.no_ipea)
 
     print(f"{'fonte':<26}{'status':<14}{'linhas':>7}  último dado")

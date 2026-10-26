@@ -13,10 +13,9 @@ __pycache__/
 *.local
 .claude/settings.local.json
 
-# Dados enviados pelo usuário (planilha Sinesp) — não versionar
+# Planilhas brutas enviadas pelo usuário — não versionar (os Parquet reduzidos em data/processed/ são versionados)
 data/raw/*
 !data/raw/.gitkeep
-data/processed/sinesp_vde.parquet
 
 # SO / editor
 .DS_Store

@@ -18,6 +18,7 @@ from src.ingestion.bcb_client import get_bcb_series
 from src.ingestion.cache import FetchResult
 from src.ingestion.http_client import build_session
 from src.ingestion.ibge_client import get_ibge_series
+from src.ingestion.sinesp_download import sync_sinesp_vde
 from src.ingestion.sinesp_loader import get_security_education, process_upload
 from src.transformation.metrics import (
     accumulated_12m,
@@ -95,6 +96,13 @@ def status_badge(label: str, results: list[FetchResult]) -> str:
     return f"<span class='mb-badge mb-warn'>🟡 {label} · cache local {when}</span>"
 
 
+def sinesp_badge(res: FetchResult) -> str:
+    """Sinesp oficial baixado = verde; só o consolidado de referência = amarelo."""
+    if res.mode == "cache" and res.synced_at:
+        return f"<span class='mb-badge mb-ok'>🟢 Sinesp VDE oficial · baixado {res.synced_at:%d/%m/%Y}</span>"
+    return status_badge("Sinesp/INEP", [res])
+
+
 with st.sidebar:
     st.markdown("### 🇧🇷 Monitor Brasil")
     st.caption("Painel público, didático e auditável.")
@@ -109,12 +117,27 @@ with st.sidebar:
     st.markdown(
         status_badge("Banco Central", [data[k] for k in SGS_SERIES]) + "<br>"
         + status_badge("IBGE", [data[k] for k in SIDRA_TABLES]) + "<br>"
-        + status_badge("Sinesp/INEP", [data["seguranca_educacao"]]),
+        + sinesp_badge(data["seguranca_educacao"]),
         unsafe_allow_html=True,
     )
     st.markdown("#### Atualizar segurança pública")
-    st.caption("Envie a planilha oficial do Sinesp VDE (.xlsx, .csv ou .parquet) com as colunas "
-               "`uf`, `evento`, `mes_ano` e `total_vitimas`.")
+    if st.button("⬇️ Baixar Sinesp VDE oficial (gov.br)", width="stretch",
+                 help="Baixa as planilhas anuais do Ministério da Justiça (~25 MB por ano; só o que falta). "
+                      "Na primeira vez leva alguns minutos."):
+        with st.status("Baixando Sinesp VDE…", expanded=True) as box:
+            bar = st.progress(0.0)
+
+            def _progress(msg: str, frac: float) -> None:
+                bar.progress(min(frac, 1.0), text=msg)
+
+            report = sync_sinesp_vde(progress=_progress)
+            failed = [y for y in report.years if y.status in ("erro",)]
+            box.update(label=f"Sinesp VDE: {report.combined_rows:,} linhas".replace(",", ".")
+                       + (f" · {len(failed)} ano(s) com erro" if failed else " · ok"),
+                       state="error" if failed and not report.ok else "complete")
+        st.cache_data.clear()
+        st.rerun()
+    st.caption("Ou envie a planilha (.xlsx, .csv, .parquet) com `uf`, `evento`, `data_referencia` e `total_vitima`.")
     upload = st.file_uploader("Planilha Sinesp VDE", type=["xlsx", "csv", "parquet"], label_visibility="collapsed")
     if upload is not None and st.session_state.get("last_upload") != upload.file_id:
         try:
@@ -132,7 +155,7 @@ option = PERIOD_OPTIONS[period_label]
 start = period_start(option)
 
 # Aviso discreto quando algo veio do cache em disco
-stale = [(k, r) for k, r in data.items() if r.mode == "cache" and r.synced_at]
+stale = [(k, r) for k, r in data.items() if r.mode == "cache" and r.synced_at and k != "seguranca_educacao"]
 if stale and "toast_shown" not in st.session_state:
     last = max(r.synced_at for _, r in stale)
     st.toast(f"API do governo indisponível para {len(stale)} fonte(s). Usando cache local de {last:%d/%m/%Y %H:%M}.", icon="⚠️")
@@ -189,11 +212,21 @@ def plot(fig, key: str) -> None:
     st.plotly_chart(fig, width="stretch", key=key, config={"displaylogo": False, "locale": "pt-BR"})
 
 
-def quality_notice(frame: pd.DataFrame) -> None:
-    if not frame.empty and (frame["qualidade"] == "aproximado").any():
+def quality_notice(frame: pd.DataFrame, pattern: str) -> None:
+    """Aviso de qualidade só sobre os indicadores mostrados na aba (``pattern`` = regex de indicadores)."""
+    shown = frame[frame["indicador"].str.contains(pattern)] if not frame.empty else frame
+    if shown.empty:
+        return
+    if (shown["qualidade"] == "aproximado").any():
         st.warning("**Atenção:** parte destes números é um **consolidado de referência aproximado** (Anuário Brasileiro de "
-                   "Segurança Pública, INEP e IBGE), usado quando não há planilha oficial. Para dados auditáveis, envie a "
-                   "planilha do **Sinesp VDE** na barra lateral.", icon="⚠️")
+                   "Segurança Pública, INEP e IBGE), usado quando não há planilha oficial. Para dados auditáveis, use "
+                   "**⬇️ Baixar Sinesp VDE oficial** na barra lateral.", icon="⚠️")
+    else:
+        years = shown["ano"]
+        st.success(f"Dados **oficiais do Sinesp VDE** (Ministério da Justiça), {int(years.min())}–{int(years.max())}. "
+                   "Apenas anos completos; taxas por 100 mil usam a população do Censo 2022 em todos os anos "
+                   "(pode diferir ~1–4% do FBSP). Em 2015–2017 a cobertura dos estados pode estar incompleta, "
+                   "o que afeta sobretudo os registros de estupro.", icon="✅")
 
 
 # --------------------------------------------------------------------------- #
@@ -297,7 +330,7 @@ with tab2:
 
 # --------------------------- Aba 3 ------------------------------------------ #
 with tab3:
-    quality_notice(sec)
+    quality_notice(sec, '^(mvi_taxa|feminicidio_total|estupro_vulneravel_total)$')
     ufs = sorted(sec.loc[(sec["indicador"] == "mvi_taxa") & (sec["uf"] != "BR"), "uf"].unique()) if not sec.empty else []
     uf = st.selectbox("Unidade da Federação", ["BR"] + ufs or ["BR"], format_func=lambda x: "Brasil consolidado" if x == "BR" else x)
     plot(charts.mvi_chart(sec, uf), "mvi")
@@ -313,7 +346,7 @@ with tab3:
 
 # --------------------------- Aba 4 ------------------------------------------ #
 with tab4:
-    quality_notice(sec)
+    quality_notice(sec, 'ideb|abandono|nem_nem')
     plot(charts.ideb_chart(sec), "ideb")
     explainer("ideb")
     plot(charts.dropout_chart(sec), "evasao")

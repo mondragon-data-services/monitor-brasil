@@ -50,10 +50,18 @@ Métricas (`src/transformation/metrics.py`): acumulado 12m por juros compostos, 
 média móvel, variação YoY em p.p. e detector de recessão técnica (2 trimestres negativos).
 
 ## ⚠️ Limitações honestas
-- **Segurança e educação**: sem planilha oficial, o app usa um **consolidado de referência aproximado** (compilado de
-  publicações do Anuário FBSP, INEP e IBGE; `qualidade="aproximado"`), com aviso na tela. Séries nacionais 2016–2024; o
-  recorte por UF é uma foto de 2023 da taxa de MVI. Para dados oficiais e série por UF, envie a planilha **Sinesp VDE**
-  (`.xlsx`/`.csv`/`.parquet` com `uf`, `evento`, `mes_ano`, `total_vitimas`) pela barra lateral ou coloque-a em `data/raw/`.
+- **Segurança pública (Sinesp VDE oficial)**: o botão **⬇️ Baixar Sinesp VDE oficial** (ou
+  `python scripts/sync_data.py --sinesp`) baixa direto do gov.br as planilhas anuais `bancovde-{ano}.xlsx`
+  (~25 MB cada), reduz cada uma a `uf × evento × mês` e grava `data/processed/sinesp_vde_{ano}.parquet` — a planilha
+  bruta é descartada. Anos fechados ficam em cache; o ano corrente é rebaixado após 7 dias. O servidor do Ministério
+  responde 403 a HEAD e a clientes sem cabeçalhos de navegador; o downloader já trata isso. Só entram **anos completos**
+  (12 meses); mortes violentas = homicídio doloso + latrocínio + lesão corporal seguida de morte + morte por
+  intervenção de agente do Estado. Taxas por 100 mil usam a população do **Censo 2022** em todos os anos (pode diferir
+  ~1–4% do FBSP). Também aceita upload manual (`.xlsx`/`.csv`/`.parquet` com `uf`, `evento`, `data_referencia`,
+  `total_vitima`) ou arquivos em `data/raw/`.
+- **Sem o Sinesp baixado**, o app usa um **consolidado de referência aproximado** (compilado de publicações do Anuário
+  FBSP, INEP e IBGE; `qualidade="aproximado"`), com aviso na tela. A taxa de feminicídio por 100 mil mulheres, o Ideb, o
+  abandono escolar e o "nem-nem" continuam vindo desse consolidado aproximado (não estão no Sinesp).
 - **Ipeadata**: a API responde, mas os códigos candidatos de segurança/IDEB retornam séries vazias; por isso a fonte é opcional.
 - O meta-prompt indicava SIDRA 6438/v4118 para subutilização, que hoje responde HTTP 400; usa-se a tabela 6441.
 

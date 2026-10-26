@@ -8,6 +8,8 @@ educação (INEP). Especificação original: `docs/meta_prompt_monitor_brasil_mv
 - Sincronizar dados (smoke test com APIs reais): `.venv\Scripts\python.exe scripts\sync_data.py`
 - Testes: `.venv\Scripts\python.exe -m pytest -q`
 - Compilar: `.venv\Scripts\python.exe -m py_compile app.py`
+- Sinesp VDE oficial (gov.br, ~25 MB/ano): `.venv\Scripts\python.exe scripts\sync_data.py --sinesp [--sinesp-years 2024 --force-sinesp]`
+  — o servidor dá 403 a HEAD/sem cabeçalhos de navegador; layout real: `uf, municipio, evento, data_referencia, total_vitima`.
 - Antes de dar uma tarefa por concluída: pytest verde + `sync_data.py` sem erro + `AppTest` sem exceções (ver skill `monitor-brasil-dados`).
 
 ## Arquitetura (Clean Architecture para dados)

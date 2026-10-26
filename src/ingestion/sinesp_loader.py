@@ -44,13 +44,38 @@ _COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "municipio": ("municipio", "cidade", "nome_municipio"),
     "evento": ("evento", "tipo_evento", "crime", "indicador", "ocorrencia"),
     "mes_ano": ("mes_ano", "data_referencia", "data", "mes", "periodo", "ano_mes", "ano"),
-    "total_vitimas": ("total_vitimas", "vitimas", "total_peso", "peso", "total", "quantidade", "ocorrencias"),
+    "total_vitimas": ("total_vitimas", "total_vitima", "vitimas", "total_peso", "peso", "total", "quantidade", "ocorrencias"),
 }
 
 
 def _norm(text: object) -> str:
     s = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode().lower().strip()
     return "_".join(s.replace("-", " ").replace("/", " ").split())
+
+
+def _parse_period(col: pd.Series) -> pd.Series:
+    """Converte a coluna de período em datetime.
+
+    Aceita datetime, texto (``01/2024``, ``2024-01``), ano solto (``2023``) e número serial do Excel
+    (``45292``), como vem em alguns anos do Sinesp VDE.
+    """
+    if pd.api.types.is_datetime64_any_dtype(col):
+        return col
+    numeric = pd.to_numeric(col, errors="coerce")
+    result = pd.Series(pd.NaT, index=col.index, dtype="datetime64[ns]")
+    is_year = numeric.between(1990, 2100)
+    is_serial = numeric.between(20_000, 80_000)
+    result[is_year] = pd.to_datetime(numeric[is_year].astype("Int64").astype(str) + "-01-01", errors="coerce")
+    result[is_serial] = pd.to_datetime(numeric[is_serial], unit="D", origin="1899-12-30", errors="coerce")
+    text = col[numeric.isna()].astype(str)
+    if not text.empty:
+        # ISO (2024-02-01) primeiro: com dayfirst=True ele seria lido como 2 de janeiro
+        parsed = pd.to_datetime(text, errors="coerce", format="ISO8601")
+        rest = parsed.isna()
+        if rest.any():
+            parsed[rest] = pd.to_datetime(text[rest], errors="coerce", dayfirst=True, format="mixed")
+        result.loc[text.index] = parsed
+    return result
 
 
 def standardize_sinesp(df: pd.DataFrame) -> pd.DataFrame:
@@ -71,11 +96,7 @@ def standardize_sinesp(df: pd.DataFrame) -> pd.DataFrame:
     out = out[["uf", "municipio", "evento", "mes_ano", "total_vitimas"]].copy()
     out["uf"] = out["uf"].astype(str).str.strip().str.upper().str[:2]
     out["evento"] = out["evento"].astype(str).str.strip()
-    parsed = pd.to_datetime(out["mes_ano"], errors="coerce", dayfirst=True)
-    # anos soltos (ex.: 2023) viram 01/01/2023
-    years = pd.to_numeric(out["mes_ano"], errors="coerce")
-    parsed = parsed.where(~years.between(1990, 2100), pd.to_datetime(years.astype("Int64").astype(str) + "-01-01", errors="coerce"))
-    out["mes_ano"] = parsed
+    out["mes_ano"] = _parse_period(out["mes_ano"])
     out["total_vitimas"] = pd.to_numeric(out["total_vitimas"], errors="coerce")
     out = out.dropna(subset=["mes_ano", "total_vitimas"])
     out = out[out["uf"].isin(UF_POPULATION)]
@@ -150,16 +171,22 @@ _MVI_EVENTS: tuple[str, ...] = ("homicidio doloso", "latrocinio", "lesao corpora
 
 
 def _event_class(evento: str) -> str | None:
+    """Classifica o evento do Sinesp. Casa pelo INÍCIO do nome: 'Morte no trânsito (exceto homicídio doloso)'
+    contém o texto 'homicídio doloso' mas NÃO é homicídio."""
     e = _norm(evento).replace("_", " ")
-    if "tentativa" in e:
-        return None
-    if "feminicidio" in e:
+    if e.startswith("feminicidio"):
         return "feminicidio_total"
-    if "estupro de vulneravel" in e:
+    if e.startswith("estupro de vulneravel"):
         return "estupro_vulneravel_total"
-    if any(k in e for k in _MVI_EVENTS):
+    if e.startswith(_MVI_EVENTS):
         return "mvi_total"
     return None
+
+
+def _complete_years(work: pd.DataFrame) -> list[int]:
+    """Anos com os 12 meses reportados (ano em curso, parcial, distorceria a série anual)."""
+    months = work[work["total_vitimas"] > 0].groupby("ano")["mes_ano"].apply(lambda s: s.dt.month.nunique())
+    return [int(y) for y, n in months.items() if n >= 12]
 
 
 def sinesp_to_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -170,6 +197,9 @@ def sinesp_to_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if work.empty:
         return pd.DataFrame(columns=["indicador", "uf", "ano", "valor", "unidade", "fonte", "qualidade"])
     work["ano"] = work["mes_ano"].dt.year
+    work = work[work["ano"].isin(_complete_years(work))]
+    if work.empty:
+        return pd.DataFrame(columns=["indicador", "uf", "ano", "valor", "unidade", "fonte", "qualidade"])
     by_uf = work.groupby(["indicador", "uf", "ano"], as_index=False)["total_vitimas"].sum().rename(columns={"total_vitimas": "valor"})
     br = by_uf.groupby(["indicador", "ano"], as_index=False)["valor"].sum().assign(uf="BR")
     totals = pd.concat([by_uf, br], ignore_index=True)
