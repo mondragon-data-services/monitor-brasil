@@ -351,3 +351,30 @@ def test_client_ip_detection(monkeypatch, xff, direct, expected):
     ctx_fake = SimpleNamespace(headers={"X-Forwarded-For": xff} if xff else {}, ip_address=direct)
     monkeypatch.setattr(ui.st, "context", ctx_fake)
     assert ui._client_ip() == expected
+
+
+# ---------------------------------------------------------------- isolamento e cache versionado -----------------
+def test_guarded_swallows_errors_but_not_streamlit_control_flow():
+    from src.agent import ui
+
+    @ui._guarded("fallback")
+    def boom():
+        raise TypeError("assinatura antiga do limitador")
+
+    @ui._guarded("fallback")
+    def rerun():
+        raise KeyboardInterrupt  # BaseException, como o RerunException do Streamlit
+
+    assert boom() == "fallback"
+    with pytest.raises(KeyboardInterrupt):
+        rerun()
+
+
+def test_cached_builders_are_keyed_on_code_version():
+    import inspect
+
+    from src.agent import ui
+    assert "version" in inspect.signature(ui._build_limiter.__wrapped__).parameters if hasattr(ui._build_limiter, "__wrapped__") else True
+    assert len(ui.CODE_VERSION) == 12 and ui.CODE_VERSION == ui._code_version()
+    assert ui.get_limiter.__code__.co_names.count("CODE_VERSION") == 1       # o hash é passado ao cache
+    assert ui.get_agent.__code__.co_names.count("CODE_VERSION") == 1

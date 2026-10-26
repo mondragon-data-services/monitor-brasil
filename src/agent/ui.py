@@ -1,10 +1,13 @@
 """Aba "Agente Monitora Brasil" (Streamlit). Toda a lógica de segurança fica em ``agent.py``/``guards.py``/``limits.py``."""
 from __future__ import annotations
 
+import functools
+import hashlib
 import ipaddress
 import logging
 import os
 import secrets
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -17,6 +20,19 @@ from src.ingestion.cache import FetchResult
 
 log = logging.getLogger(__name__)
 
+def _code_version() -> str:
+    """Hash do código do agente: entra como argumento dos ``st.cache_resource`` para que um redeploy NUNCA reaproveite um
+    objeto criado por uma versão antiga das classes (causava TypeError em produção ao mudar a assinatura do limitador)."""
+    h = hashlib.sha256()
+    for name in ("limits.py", "agent.py", "guards.py", "tools.py", "context.py", "prompts.py"):
+        try:
+            h.update((Path(__file__).with_name(name)).read_bytes())
+        except OSError:
+            h.update(name.encode())
+    return h.hexdigest()[:12]
+
+
+CODE_VERSION = _code_version()
 SUGGESTIONS = ("Como está a segurança pública?", "Como está o endividamento?", "Como está o PIB?")
 
 
@@ -43,7 +59,7 @@ def agent_enabled() -> bool:
 
 
 @st.cache_resource(show_spinner=False)
-def get_limiter() -> RateLimiter:
+def _build_limiter(version: str) -> RateLimiter:
     """Um único limitador por processo, compartilhado entre TODAS as sessões (é o que impede burlar recarregando a página)."""
     base = Limits()
     return RateLimiter(Limits(
@@ -55,8 +71,16 @@ def get_limiter() -> RateLimiter:
     ))
 
 
-@st.cache_resource(show_spinner=False)
+def get_limiter() -> RateLimiter:
+    return _build_limiter(CODE_VERSION)
+
+
 def get_agent() -> MonitoraBrasilAgent | None:
+    return _build_agent(CODE_VERSION)
+
+
+@st.cache_resource(show_spinner=False)
+def _build_agent(version: str) -> MonitoraBrasilAgent | None:
     key = _secret("OPENAI_API_KEY")
     if not key:
         return None
@@ -94,6 +118,28 @@ def _debug_line(limiter: RateLimiter, sid: str, ip: str | None) -> str:
     st_ = limiter.stats()
     return (f"IP público detectado: {'sim' if ip else 'NÃO (limite só por sessão)'} · perguntas restantes: "
             f"{limiter.remaining(sid, ip)} · perguntas hoje no app: {st_['perguntas_hoje']}")
+
+
+def _guarded(fallback: Any = None, message: str | None = None):
+    """Isola o agente do resto do painel: qualquer falha vira log + (opcional) aviso discreto, nunca erro de página.
+
+    ``st.rerun`` levanta uma exceção de controle (BaseException) que passa por aqui sem ser capturada.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                log.error("falha no agente (%s): %s: %s", fn.__name__, type(exc).__name__, exc)
+                if message:
+                    st.info(message, icon="ℹ️")
+                return fallback
+        return wrapper
+    return deco
+
+
+_UNAVAILABLE = "O agente está temporariamente indisponível. Os gráficos e dados do painel continuam funcionando normalmente."
 
 
 def _esc(text: str) -> str:
@@ -168,6 +214,7 @@ def _render_chat(data: dict[str, FetchResult], where: str) -> None:
         st.warning("Você usou todas as perguntas disponíveis para este acesso hoje. Os gráficos continuam disponíveis para explorar!", icon="🔒")
 
 
+@_guarded(None, _UNAVAILABLE)
 def render_agent_tab(data: dict[str, FetchResult]) -> None:
     st.subheader("🤖 Agente Monitora Brasil")
     st.caption("Pergunte sobre os **dados e gráficos deste painel**. As respostas são geradas por IA a partir dos números "
@@ -195,6 +242,7 @@ SIDEBAR_CSS = """
 """
 
 
+@_guarded(False)
 def sidebar_agent_button() -> bool:
     """Botão em destaque no topo da barra lateral. Devolve ``True`` no clique (a janela é aberta por ``open_agent``)."""
     st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
@@ -211,5 +259,6 @@ def limiter_left() -> int:
     return get_limiter().remaining(_sid(), _client_ip())
 
 
+@_guarded(None, _UNAVAILABLE)
 def open_agent(data: dict[str, FetchResult]) -> None:
     _agent_dialog(data)
