@@ -1,0 +1,25 @@
+# Ambientes e caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Segredos / config local
+.streamlit/secrets.toml
+.env
+*.local
+.claude/settings.local.json
+
+# Dados enviados pelo usuário (planilha Sinesp) — não versionar
+data/raw/*
+!data/raw/.gitkeep
+data/processed/sinesp_vde.parquet
+
+# SO / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
