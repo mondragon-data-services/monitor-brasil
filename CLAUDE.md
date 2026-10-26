@@ -10,6 +10,8 @@ educação (INEP). Especificação original: `docs/meta_prompt_monitor_brasil_mv
 - Compilar: `.venv\Scripts\python.exe -m py_compile app.py`
 - Sinesp VDE oficial (gov.br, ~25 MB/ano): `.venv\Scripts\python.exe scripts\sync_data.py --sinesp [--sinesp-years 2024 --force-sinesp]`
   — o servidor dá 403 a HEAD/sem cabeçalhos de navegador; layout real: `uf, municipio, evento, data_referencia, total_vitima`.
+- Agente (OpenAI): chave SÓ em `.streamlit/secrets.toml`/Secrets do Cloud — nunca no chat, código ou commit. Teste ao vivo:
+  `.venv\Scripts\python.exe scripts\agent_smoke.py`. Código em `src/agent/` (ver README, seção "Agente Monitora Brasil").
 - Antes de dar uma tarefa por concluída: pytest verde + `sync_data.py` sem erro + `AppTest` sem exceções (ver skill `monitor-brasil-dados`).
 
 ## Arquitetura (Clean Architecture para dados)

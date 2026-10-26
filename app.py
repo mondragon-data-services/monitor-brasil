@@ -1,6 +1,7 @@
 """Monitor Brasil — Painel Cidadão de Indicadores Socioeconômicos (entrypoint Streamlit)."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import pandas as pd
@@ -14,6 +15,7 @@ from src.config import (
     SGS_SERIES,
     SIDRA_TABLES,
 )
+from src.agent.ui import render_agent_tab
 from src.ingestion.bcb_client import get_bcb_series
 from src.ingestion.cache import FetchResult
 from src.ingestion.http_client import build_session
@@ -53,24 +55,17 @@ st.markdown(
 # Camada 1 do cache (memória, 24h). A camada 2 (Parquet) vive em src/ingestion/cache.py
 # --------------------------------------------------------------------------- #
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_bcb(key: str) -> FetchResult:
-    return get_bcb_series(key, session=build_session())
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_ibge(key: str) -> FetchResult:
-    return get_ibge_series(key, session=build_session())
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
 def load_security() -> FetchResult:
     return get_security_education()
 
 
 @st.cache_data(ttl=86400, show_spinner="Consultando Banco Central e IBGE…")
 def load_everything() -> dict[str, FetchResult]:
-    out: dict[str, FetchResult] = {k: load_bcb(k) for k in SGS_SERIES}
-    out.update({k: load_ibge(k) for k in SIDRA_TABLES})
+    """Baixa todas as séries em paralelo: uma API lenta do governo não trava as demais."""
+    jobs = {**{k: (get_bcb_series, k) for k in SGS_SERIES}, **{k: (get_ibge_series, k) for k in SIDRA_TABLES}}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {k: pool.submit(fn, key, None, build_session()) for k, (fn, key) in jobs.items()}
+        out: dict[str, FetchResult] = {k: f.result() for k, f in futures.items()}
     out["seguranca_educacao"] = load_security()
     return out
 
@@ -290,8 +285,8 @@ with k5:
 
 st.divider()
 
-tab1, tab2, tab3, tab4 = st.tabs(["💰 Inflação, Juros e Risco Fiscal", "👷 Emprego, Renda e Recessão",
-                                  "🚨 Segurança e Vulneráveis", "🎓 Educação e Futuro"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["💰 Inflação, Juros e Risco Fiscal", "👷 Emprego, Renda e Recessão",
+                                        "🚨 Segurança e Vulneráveis", "🎓 Educação e Futuro", "🤖 Agente Monitora Brasil"])
 
 # --------------------------- Aba 1 ------------------------------------------ #
 with tab1:
@@ -353,6 +348,10 @@ with tab4:
     explainer("evasao")
     data_section("educacao", {"Educação (consolidado)": sec[sec["indicador"].str.contains("ideb|abandono|nem_nem")]
                               if not sec.empty else sec})
+
+# --------------------------- Aba 5 ------------------------------------------ #
+with tab5:
+    render_agent_tab(data)
 
 st.divider()
 st.caption("Monitor Brasil é um projeto de dados abertos. Os números vêm de APIs públicas do governo e podem sofrer "

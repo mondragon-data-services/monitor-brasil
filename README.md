@@ -65,6 +65,41 @@ média móvel, variação YoY em p.p. e detector de recessão técnica (2 trimes
 - **Ipeadata**: a API responde, mas os códigos candidatos de segurança/IDEB retornam séries vazias; por isso a fonte é opcional.
 - O meta-prompt indicava SIDRA 6438/v4118 para subutilização, que hoje responde HTTP 400; usa-se a tabela 6441.
 
+## 🤖 Agente Monitora Brasil (OpenAI)
+Aba que responde perguntas **somente** sobre os dados e gráficos do painel ("Como está a segurança pública?",
+"Como está o endividamento?", "Como está o PIB?"). Código em `src/agent/`.
+
+**Por que não é RAG vetorial.** Os dados são séries numéricas estruturadas e pequenas. Embeddings recuperam trechos
+"parecidos" e perdem datas, defasagens e variações — é assim que um LLM inventa números. O agente usa **recuperação
+estruturada com function calling** (Responses API): o modelo só escolhe qual consulta fazer
+(`get_overview`, `get_indicator_snapshot`, `get_time_series`, `get_security_by_uf`, `explain_topic`) e os números
+(último valor, variação em 12 meses, mínimo/máximo, séries, manchetes dos gráficos) são **calculados em código** sobre um
+catálogo fixo de 21 indicadores. Menos custo, nenhum embedding, respostas verificáveis.
+
+**Camadas de segurança**
+| Camada | O que faz |
+|---|---|
+| Chave | só em `st.secrets`/variável de ambiente; nunca no código, logs, UI ou resposta; `secrets.toml` está no `.gitignore` |
+| Limite | **5 perguntas por sessão (fixo)** + limite diário por visitante (IP, guardado só como hash), disjuntor global de perguntas e de tokens por dia, intervalo mínimo entre perguntas e uma pergunta em andamento por sessão |
+| Entrada | normalização Unicode, remoção de caracteres invisíveis, máx. 400 caracteres, detecção de injeção PT/EN **antes** do modelo (recusa local, sem gastar API) |
+| Prompt | instruções claras, pergunta do usuário delimitada e tratada como dado não confiável, regras invioláveis, recusa padrão, exemplos |
+| Ferramentas | somente leitura, argumentos validados contra listas fechadas (enum, `strict`), nenhum texto livre chega aos dados, no máx. 5 rodadas / 8 chamadas |
+| Escopo | resposta sem consulta aos dados vira recusa padrão (o modelo não "conversa solto") |
+| Saída | remove links, imagens, HTML e código; bloqueia vazamento do prompt (canário) e de chaves |
+| Erros | mensagens genéricas; detalhes da API nunca chegam ao usuário |
+
+**Onde colocar a chave (nunca no chat nem no Git)**
+- Local: edite `.streamlit/secrets.toml` → `OPENAI_API_KEY = "sk-..."` (arquivo ignorado pelo Git; modelo em `secrets.toml.example`).
+- Streamlit Cloud: *App → ⋮ → Settings → Secrets* → cole `OPENAI_API_KEY = "sk-..."` → Save.
+- Recomendado: crie uma **chave de projeto dedicada** no painel da OpenAI, com **limite mensal de gasto** (a proteção
+  definitiva de dinheiro) e, se possível, restrinja os modelos permitidos. Se a chave vazar, revogue-a imediatamente.
+- Opcionais em secrets: `OPENAI_MODEL` (padrão `gpt-5-mini`), `AGENT_ENABLED=false` (desliga na hora),
+  `AGENT_CLIENT_DAILY`, `AGENT_GLOBAL_DAILY`, `AGENT_TOKENS_DAILY`, `AGENT_COOLDOWN_S`.
+
+**Limites honestos.** Os contadores ficam na memória do processo (zeram se o app reiniciar) e o IP vem do cabeçalho do
+proxy; por isso o teto real de gasto são os limites globais + o limite de gasto da OpenAI. Cada pergunta usa ~6–10 mil
+tokens (centavos). Teste ao vivo: `python scripts/agent_smoke.py`.
+
 ## Deploy no Streamlit Community Cloud
 1. Acesse <https://share.streamlit.io> e entre com a conta GitHub `mondragon-data-services`.
 2. **Create app → Deploy a public app from GitHub**:
