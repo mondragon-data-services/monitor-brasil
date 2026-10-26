@@ -67,18 +67,33 @@ def get_agent() -> MonitoraBrasilAgent | None:
 
 
 def _client_ip() -> str | None:
-    """IP do visitante (só para o limite por cliente; guardado apenas como hash). Cabeçalho inválido é ignorado."""
+    """IP PÚBLICO do visitante (só vira hash no limitador). Devolve ``None`` se não houver um confiável.
+
+    Usa a entrada mais à DIREITA e pública de ``X-Forwarded-For`` (a que o proxy mais próximo do servidor acrescentou — o
+    cliente só consegue acrescentar entradas à ESQUERDA, então forjar não muda o resultado), mais ``st.context.ip_address``.
+    IPs privados/loopback (proxies internos, execução local) são ignorados: compartilhá-los bloquearia todo mundo junto.
+    """
     try:
-        raw = st.context.headers.get("X-Forwarded-For") or st.context.ip_address
+        headers = st.context.headers
+        entries = [e.strip() for e in str(headers.get("X-Forwarded-For") or "").split(",") if e.strip()]
+        direct = st.context.ip_address
     except Exception:
         return None
-    if not raw:
-        return None
-    candidate = str(raw).split(",")[0].strip()
-    try:
-        return str(ipaddress.ip_address(candidate))
-    except ValueError:
-        return None
+    candidates = [*entries, *([str(direct)] if direct else [])]
+    for raw in reversed(candidates):
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if ip.is_global:
+            return str(ip)
+    return None
+
+
+def _debug_line(limiter: RateLimiter, sid: str, ip: str | None) -> str:
+    st_ = limiter.stats()
+    return (f"IP público detectado: {'sim' if ip else 'NÃO (limite só por sessão)'} · perguntas restantes: "
+            f"{limiter.remaining(sid, ip)} · perguntas hoje no app: {st_['perguntas_hoje']}")
 
 
 def _esc(text: str) -> str:
@@ -108,8 +123,10 @@ def _render_chat(data: dict[str, FetchResult], where: str) -> None:
         st.info("O agente está temporariamente indisponível.", icon="ℹ️")
         return
 
-    sid = _sid()
-    remaining = limiter.remaining(sid)
+    sid, ip = _sid(), _client_ip()
+    remaining = limiter.remaining(sid, ip)
+    if str(_secret("AGENT_DEBUG", "false")).lower() in ("true", "1"):  # diagnóstico opcional, só com AGENT_DEBUG=true
+        st.caption(_debug_line(limiter, sid, ip))
     st.progress(remaining / SESSION_LIMIT, text=f"Perguntas restantes nesta sessão: **{remaining} de {SESSION_LIMIT}**")
 
     pending: str | None = st.session_state.pop(f"agent_pending_{where}", None)
@@ -142,13 +159,13 @@ def _render_chat(data: dict[str, FetchResult], where: str) -> None:
     if question:
         st.session_state["agent_msgs"].append({"role": "user", "text": question[:MAX_INPUT_CHARS]})
         with st.spinner("Consultando os dados do painel…"):
-            reply = agent.ask(question, build_context(data), sid, _client_ip())
+            reply = agent.ask(question, build_context(data), sid, ip)
         note = {"ok": "Resposta gerada por IA com base nos dados do painel.", "limite": "Limite de uso atingido."}.get(reply.status, "")
         st.session_state["agent_msgs"].append({"role": "assistant", "text": reply.text, "note": note})
         refresh()
 
     if remaining == 0:
-        st.warning(f"Você usou as {SESSION_LIMIT} perguntas desta sessão. Os gráficos continuam disponíveis para explorar!", icon="🔒")
+        st.warning("Você usou todas as perguntas disponíveis para este acesso hoje. Os gráficos continuam disponíveis para explorar!", icon="🔒")
 
 
 def render_agent_tab(data: dict[str, FetchResult]) -> None:
@@ -191,7 +208,7 @@ def sidebar_agent_button() -> bool:
 
 
 def limiter_left() -> int:
-    return get_limiter().remaining(_sid())
+    return get_limiter().remaining(_sid(), _client_ip())
 
 
 def open_agent(data: dict[str, FetchResult]) -> None:

@@ -1,8 +1,9 @@
 """Limitador de uso em camadas para proteger os créditos da OpenAI (thread-safe, sem dependências externas).
 
 Camadas (todas checadas ANTES de chamar o modelo; a reserva é atômica e conta mesmo se a chamada falhar):
-1. Sessão: no máximo ``session`` perguntas (5). Recarregar a página cria sessão nova, por isso existem as camadas 2–4.
-2. Cliente (IP, só o hash com sal): ``client_daily`` perguntas por dia.
+1. Sessão: no máximo ``session`` perguntas (5).
+2. Cliente (IP, só o hash com sal): ``client_daily`` perguntas por dia (padrão 5). É esta camada que impede burlar o limite
+   com F5/nova aba: o contador acompanha o IP, não a sessão. Sem IP público detectável, só valem as demais camadas.
 3. Global: ``global_daily`` perguntas por dia e ``tokens_daily`` tokens por dia para o app inteiro (disjuntor de custo).
 4. Intervalo mínimo (``cooldown_s``) entre perguntas e uma única pergunta em andamento por sessão (anti-flood).
 
@@ -27,7 +28,7 @@ _BRT = timezone(timedelta(hours=-3))
 @dataclass(frozen=True)
 class Limits:
     session: int = SESSION_LIMIT
-    client_daily: int = 15
+    client_daily: int = SESSION_LIMIT
     global_daily: int = 200
     tokens_daily: int = 800_000
     cooldown_s: float = 8.0
@@ -49,7 +50,7 @@ class RateLimiter:
         self._lock = threading.Lock()
         self._salt = secrets.token_hex(8)
         self._sessions: OrderedDict[str, dict] = OrderedDict()
-        self._clients: OrderedDict[str, int] = OrderedDict()
+        self._clients: OrderedDict[str, dict] = OrderedDict()
         self._day = self._today()
         self._global_count = 0
         self._tokens = 0
@@ -74,9 +75,15 @@ class RateLimiter:
             store.popitem(last=False)
 
     # -- API -------------------------------------------------------------------------------------------------
-    def remaining(self, session_id: str) -> int:
+    def remaining(self, session_id: str, client_id: str | None = None) -> int:
+        """Perguntas que ainda podem ser feitas: o menor entre o saldo da sessão e o do IP (quando há IP)."""
         with self._lock:
-            return max(0, self.limits.session - self._sessions.get(session_id, {}).get("used", 0))
+            self._roll_day()
+            left = self.limits.session - self._sessions.get(session_id, {}).get("used", 0)
+            client = self.hash_client(client_id)
+            if client and self.limits.client_daily:
+                left = min(left, self.limits.client_daily - self._clients.get(client, {}).get("n", 0))
+            return max(0, left)
 
     def acquire(self, session_id: str, client_id: str | None) -> Decision:
         """Reserva UMA pergunta (atômico). Se negada, nada é consumido."""
@@ -92,11 +99,13 @@ class RateLimiter:
                 return Decision(False, "busy", "Aguarde a resposta anterior antes de perguntar de novo.", 2.0)
             if sess["used"] >= lim.session:
                 return Decision(False, "session", f"Você usou as {lim.session} perguntas desta sessão. Obrigado por usar o agente!")
-            wait = sess["last"] + lim.cooldown_s - now
+            last = max(sess["last"], self._clients.get(client, {}).get("last", 0.0) if client else 0.0)
+            wait = last + lim.cooldown_s - now
             if wait > 0:
                 return Decision(False, "cooldown", f"Aguarde {int(wait) + 1} s para a próxima pergunta.", wait)
-            if client and self._clients.get(client, 0) >= lim.client_daily:
-                return Decision(False, "client", "Limite diário de perguntas atingido para este acesso. Volte amanhã.")
+            if client and lim.client_daily and self._clients.get(client, {}).get("n", 0) >= lim.client_daily:
+                return Decision(False, "client", f"Você já usou as {lim.client_daily} perguntas diárias deste acesso. "
+                                                 "Volte amanhã — os gráficos continuam disponíveis!")
             if self._global_count >= lim.global_daily or self._tokens >= lim.tokens_daily:
                 reason = "global" if self._global_count >= lim.global_daily else "tokens"
                 return Decision(False, reason, "O agente atingiu o limite diário de uso do painel. Volte amanhã.")
@@ -105,7 +114,9 @@ class RateLimiter:
             sess["last"], sess["busy"] = now, True
             self._global_count += 1
             if client:
-                self._clients[client] = self._clients.get(client, 0) + 1
+                rec = self._clients.setdefault(client, {"n": 0, "last": 0.0})
+                rec["n"] += 1
+                rec["last"] = now
                 self._clients.move_to_end(client)
                 self._trim(self._clients, lim.max_tracked)
             return Decision(True)

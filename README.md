@@ -80,7 +80,7 @@ catálogo fixo de 21 indicadores. Menos custo, nenhum embedding, respostas verif
 | Camada | O que faz |
 |---|---|
 | Chave | só em `st.secrets`/variável de ambiente; nunca no código, logs, UI ou resposta; `secrets.toml` está no `.gitignore` |
-| Limite | **5 perguntas por sessão (fixo)** + limite diário por visitante (IP, guardado só como hash), disjuntor global de perguntas e de tokens por dia, intervalo mínimo entre perguntas e uma pergunta em andamento por sessão |
+| Limite | **5 perguntas por sessão (fixo) e 5 por dia por IP** — a cota segue o IP, então F5 ou nova aba **não** zera —, mais disjuntor global de perguntas e de tokens por dia, intervalo mínimo entre perguntas (também por IP) e uma pergunta em andamento por sessão. O IP é guardado só como hash |
 | Entrada | normalização Unicode, remoção de caracteres invisíveis, máx. 400 caracteres, detecção de injeção PT/EN **antes** do modelo (recusa local, sem gastar API) |
 | Prompt | instruções claras, pergunta do usuário delimitada e tratada como dado não confiável, regras invioláveis, recusa padrão, exemplos |
 | Ferramentas | somente leitura, argumentos validados contra listas fechadas (enum, `strict`), nenhum texto livre chega aos dados, no máx. 5 rodadas / 8 chamadas |
@@ -96,8 +96,12 @@ catálogo fixo de 21 indicadores. Menos custo, nenhum embedding, respostas verif
 - Opcionais em secrets: `OPENAI_MODEL` (padrão `gpt-5-mini`), `AGENT_ENABLED=false` (desliga na hora),
   `AGENT_CLIENT_DAILY`, `AGENT_GLOBAL_DAILY`, `AGENT_TOKENS_DAILY`, `AGENT_COOLDOWN_S`.
 
-**Limites honestos.** Os contadores ficam na memória do processo (zeram se o app reiniciar) e o IP vem do cabeçalho do
-proxy; por isso o teto real de gasto são os limites globais + o limite de gasto da OpenAI. Cada pergunta usa ~6–10 mil
+**Limites honestos.** Os contadores ficam na memória do processo (zeram se o app reiniciar). O IP vem do cabeçalho
+`X-Forwarded-For` (usa a entrada pública mais à direita, que o cliente não consegue forjar; IPs privados/proxies internos
+são ignorados). Redes com IP compartilhado (CGNAT de operadoras, empresas) dividem a mesma cota de 5 — ajuste
+`AGENT_CLIENT_DAILY` se isso incomodar. Se nenhum IP público for detectável, vale só o limite por sessão + os globais; para
+conferir em produção, ative `AGENT_DEBUG = true` em Secrets (mostra "IP público detectado: sim/não" no agente). O teto real
+de gasto são os limites globais + o limite de gasto da OpenAI. Cada pergunta usa ~6–10 mil
 tokens (centavos). Teste ao vivo: `python scripts/agent_smoke.py`.
 
 ## Deploy no Streamlit Community Cloud

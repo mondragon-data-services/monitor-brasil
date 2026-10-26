@@ -297,3 +297,57 @@ def test_chart_headlines_are_clean_text(ctx):
     for h in ctx.chart_headlines("tudo"):
         t = h["titulo_e_subtitulo"]
         assert "<" not in t and "—  " not in t and ": —" not in t
+
+
+# ---------------------------------------------------------------- F5 / nova aba não zera a cota ------------------
+def test_f5_new_session_same_ip_keeps_the_quota():
+    """Reproduz o bug: F5 cria sessão nova; a cota de 5 deve acompanhar o IP."""
+    clk = Clock()
+    rl = RateLimiter(Limits(cooldown_s=0), clk)
+    for _ in range(5):
+        assert rl.acquire("sessao-1", "203.0.113.7").allowed
+        rl.release("sessao-1")
+    assert rl.remaining("sessao-1", "203.0.113.7") == 0
+    assert rl.remaining("sessao-2-apos-f5", "203.0.113.7") == 0           # contador mostrado já vem zerado
+    d = rl.acquire("sessao-2-apos-f5", "203.0.113.7")
+    assert not d.allowed and d.reason == "client" and "5 perguntas" in d.message
+    assert rl.acquire("sessao-3", "198.51.100.9").allowed                  # outro visitante não é afetado
+
+
+def test_quota_resets_next_day_and_ip_less_falls_back_to_session():
+    clk = Clock()
+    rl = RateLimiter(Limits(cooldown_s=0), clk)
+    for _ in range(5):
+        rl.acquire("s1", "203.0.113.7")
+        rl.release("s1")
+    clk.t += 86_400
+    assert rl.remaining("s9", "203.0.113.7") == 5 and rl.acquire("s9", "203.0.113.7").allowed
+    # sem IP detectável: vale só a sessão (+ limites globais)
+    assert rl.remaining("novo", None) == 5
+
+
+def test_cooldown_also_follows_the_ip_across_sessions():
+    clk = Clock()
+    rl = RateLimiter(Limits(cooldown_s=8), clk)
+    assert rl.acquire("a", "203.0.113.7").allowed
+    rl.release("a")
+    assert rl.acquire("b-apos-f5", "203.0.113.7").reason == "cooldown"
+
+
+def test_default_client_quota_equals_session_quota():
+    assert Limits().client_daily == Limits().session == 5
+
+
+# ---------------------------------------------------------------- detecção do IP --------------------------------
+@pytest.mark.parametrize("xff,direct,expected", [
+    ("1.1.1.1, 8.8.8.8", None, "8.8.8.8"),                  # cliente forjou 1.1.1.1; o proxy acrescentou o IP real
+    ("9.9.9.9, 8.8.8.8, 10.0.0.5", None, "8.8.8.8"),        # proxy interno (privado) à direita é ignorado
+    ("", "8.8.4.4", "8.8.4.4"),                              # sem cabeçalho: usa o IP da conexão
+    ("lixo, <script>", None, None),                          # valores inválidos
+    ("10.0.0.1, 192.168.0.7", "127.0.0.1", None),            # só IPs privados/loopback (ex.: execução local) -> sem IP
+])
+def test_client_ip_detection(monkeypatch, xff, direct, expected):
+    from src.agent import ui
+    ctx_fake = SimpleNamespace(headers={"X-Forwarded-For": xff} if xff else {}, ip_address=direct)
+    monkeypatch.setattr(ui.st, "context", ctx_fake)
+    assert ui._client_ip() == expected
