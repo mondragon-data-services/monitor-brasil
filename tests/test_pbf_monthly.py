@@ -166,3 +166,9 @@ def test_prompt_and_limits_updated_for_monthly_data():
     from src.agent.tools import NOT_AVAILABLE
     assert "benefício médio por estado" not in build_instructions("x")
     assert "não há base nacional aberta" in NOT_AVAILABLE and "24 meses" in NOT_AVAILABLE
+
+
+def test_bolsa_familia_explainer_cites_both_sources():
+    from src.config import EXPLAINERS
+    ex = EXPLAINERS["bolsa_familia"]
+    assert "Portal da Transparência" in ex.source_label and "Ipeadata" in ex.source_label and ex.source_url.startswith("https://portaldatransparencia")

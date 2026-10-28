@@ -471,8 +471,9 @@ EXPLAINERS: dict[str, Explainer] = {
              "famílias recebem o benefício em dezembro e qual o valor médio.",
         why="O programa sustenta a renda de milhões de famílias pobres e movimenta o comércio local. Mudanças no valor total "
             "refletem o número de famílias atendidas e o benefício médio.",
-        source_label="Ministério do Desenvolvimento Social — via Ipeadata (VAL_PBF12)",
-        source_url="http://www.ipeadata.gov.br/",
+        source_label="Ministério do Desenvolvimento Social — Portal da Transparência (pagamentos mensais por estado) e Ipeadata "
+                     "(valor mensal e dezembro de cada ano)",
+        source_url="https://portaldatransparencia.gov.br/download-de-dados/novo-bolsa-familia",
     ),
     "dengue": Explainer(
         what="Casos prováveis de dengue notificados ao SUS por semana epidemiológica (domingo a sábado). As semanas mais recentes "
