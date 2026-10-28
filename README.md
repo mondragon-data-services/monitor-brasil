@@ -41,6 +41,26 @@ Planilha Sinesp (data/raw ou upload) ─┘                    (cache em disco) 
 | `pib_4tri` | IBGE SIDRA | tabela 5932 / var 6562 | % (acum. 4 tri) |
 | `pib_trimestral` | IBGE SIDRA | tabela 5932 / var 6564 | % (tri/tri dessaz.) |
 | `seguranca_educacao` | Sinesp VDE / FBSP / INEP / IBGE | consolidado | ver abaixo |
+| `cambio_dolar` | BCB SGS | 1 | R$ (diário) |
+| `resultado_primario` / `resultado_nominal` | BCB SGS | 5793 / 5727 | % do PIB, acumulado 12m (**positivo = déficit**) |
+| `inadimplencia_pf` | BCB SGS | 21084 | % do crédito das famílias |
+| `juros_cartao_rotativo` / `juros_cheque_especial` | BCB SGS | 22022 / 20741 | % a.a. |
+| `salario_minimo` | BCB SGS | 1619 | R$ |
+| `focus` | BCB Olinda — Boletim Focus (expectativas anuais) | `ExpectativasMercadoAnuais` | IPCA, Selic, PIB e câmbio (mediana) |
+| `ipea_pobreza` / `ipea_pobreza_extrema` | Ipeadata (PNAD/IBGE) | `PNADS_PERCPOBRE830` / `PNADS_PERCPOBRE300` | % da população abaixo de US$ 8,30 / US$ 3,00 por dia (PPC), anual |
+| `soc_gini` | IBGE SIDRA | 7435 / v10681 | índice 0–1, anual |
+| `soc_inseguranca_alimentar` | IBGE SIDRA | 9552 / v9784 | % dos domicílios por categoria (2023, 2024) |
+| `soc_informalidade` | IBGE SIDRA | 8513 / v12466 | %, trimestre móvel |
+| `soc_posicao_ocupacao` | IBGE SIDRA | 6320 / v4090 | mil pessoas por posição na ocupação, trimestre móvel |
+| `soc_massa_rendimento` / `soc_desalento` | IBGE SIDRA | 6392 / v6293 · 6807 / v9869 | R$ milhões · % |
+| `ipea_caged_saldo` | Ipeadata (Ministério do Trabalho) | `CAGED12_SALDONAJU12` | saldo mensal de vagas com carteira (ajustado) |
+| `ipea_bolsa_familia` | Ipeadata (MDS) | `VAL_PBF12` (nível Brasil) | valor total pago, R$ mil/mês |
+| `tabnet_leitos` | Ministério da Saúde — CNES via TabNet | `cnes/cnv/leiintbr.def` | leitos existentes e SUS por UF (dezembros + mês mais recente) |
+| `tabnet_pni` | Ministério da Saúde — SI-PNI via TabNet | `bd_pni/cpnibr.def` | cobertura vacinal (%) por UF e ano (até 2022) |
+| `ipea_pbf_familias` / `ipea_pbf_valor_dez` | Ipeadata (MDS) | `FAM_PBF` / `VAL_PBF` | benefícios e valor total do Bolsa Família em dezembro (Brasil e UF) |
+| `dengue` | Ministério da Saúde — SINAN (OpenDataSUS) | `DENGBR{aa}.csv.zip` | casos prováveis, graves e óbitos por semana epidemiológica e UF |
+| `soc_mortalidade_infancia` | IBGE SIDRA | 6695 / v9731 | óbitos de menores de 5 anos por mil nascidos vivos (Brasil e UF) |
+| `wb_*` | Banco Mundial (OMS/UNICEF/ONU) — **fonte secundária** | `SH.IMM.MEAS`, `SH.IMM.IDPT`, `SP.DYN.LE00.IN`, `SH.XPD.CHEX.GD.ZS`, `SH.XPD.GHED.GD.ZS` | vacinação (sarampo, DTP), expectativa de vida, gasto em saúde |
 | `anp_gasolina` | ANP — síntese semanal de preços (Brasil + 27 UFs) | `semanal-brasil/estados-desde-2013.xlsx` | R$/litro (gasolina comum), semanal |
 | `ipca_itens` | IBGE SIDRA | tabela 7060 / var 63 | variação mensal % por item (desde jan/2020) |
 
@@ -50,6 +70,43 @@ Indicadores do consolidado (`seguranca_educacao_consolidado.parquet`): `mvi_taxa
 
 Métricas (`src/transformation/metrics.py`): acumulado 12m por juros compostos, juro real (Fisher), taxa por 100 mil hab.,
 média móvel, variação YoY em p.p. e detector de recessão técnica (2 trimestres negativos).
+
+## 💵 Dólar, Focus, fiscal, crédito e salário mínimo
+- **Dólar** (SGS 1) e **expectativas do mercado** (Focus: IPCA, Selic, PIB e câmbio para o ano corrente e os dois seguintes), na
+  aba de inflação/fiscal. O Focus usa a base dos últimos 30 dias (`baseCalculo = 0`).
+- **Resultado fiscal**: primário (SGS 5793) e nominal (SGS 5727), em % do PIB, acumulado em 12 meses. **Positivo = déficit.**
+  Juros da dívida = nominal − primário (identidade contábil; não é série própria).
+- **Crédito das famílias**: inadimplência PF (21084), juros do rotativo do cartão (22022) e do cheque especial (20741).
+- **Salário mínimo real**: valor de cada mês corrigido pelo IPCA até o último mês (`metrics.real_minimum_wage`).
+- **Contas fixas da casa** (aba de preços): energia, gás de botijão, aluguel, condomínio, água, internet, plano de saúde,
+  remédios, ônibus, transporte por aplicativo e passagem aérea — mesmo IPCA por item (SIDRA 7060).
+
+## 🤝 Pobreza, desigualdade, fome e qualidade do emprego (aba "Pobreza e Desigualdade")
+Pobreza e extrema pobreza (linhas de US$ 8,30 e US$ 3,00/dia), Gini, insegurança alimentar (2023–2024), informalidade, ocupados com e
+sem carteira e conta própria, saldo do Novo Caged, massa de rendimento, desalento e valor total do Bolsa Família.
+- **Bolsa Família**: valor total pago por mês (Ipeadata `VAL_PBF12`) e, **por ano (dezembro)**, número de famílias/benefícios — Brasil e
+  27 UFs — e benefício médio (valor ÷ benefícios; Ipeadata `FAM_PBF` e `VAL_PBF`, ~20 MB cada, em cache de 30 dias).
+- **Bolsa Família mensal por estado** (famílias e valor médio): ETL do arquivo de pagamentos do **Portal da Transparência** (zip de ~330 MB e ~2 GB de
+  CSV por mês). Rode `python scripts/sync_data.py --bolsa-familia [--pbf-months 24]`: cada mês é baixado, agregado por UF (famílias = NIS distintos;
+  valor = soma das parcelas; o total de ago/2026 bate com o `VAL_PBF12` do Ipeadata: R$ 12,763 bi) e descartado; só `pbf_AAAAMM.parquet` (poucas
+  linhas) é guardado. O app **não** baixa isso ao abrir (≈ 45 s por mês): atualize mensalmente e faça commit dos Parquet.
+- A PNAD de segurança alimentar só tem 2 pontos (2023 e 2024).
+
+## 🏥 Saúde (aba "Saúde")
+- **Dengue** (SINAN/OpenDataSUS): lê `DENGBR{aa}.csv.zip` (15–45 MB/ano) e guarda `semana × UF` em `data/processed/dengue_{ano}.parquet`.
+  Só o ano corrente é rebaixado (após 3 dias). **As últimas 3 semanas ficam de fora** (atraso de digitação). Incidência por 100 mil usa a
+  população do Censo 2022. Casos = notificações não descartadas; óbitos = evolução "óbito pelo agravo".
+- **Mortalidade de menores de 5 anos** por estado: IBGE (ODS 3.2.1), até 2023.
+- **Leitos hospitalares por estado** (CNES, Ministério da Saúde): existentes e do SUS, por mil habitantes (população do Censo 2022 em todos
+  os anos), via consulta ao TabNet/DATASUS (POST de formulário; um valor por dezembro desde 2011 + o mês mais recente; cache de 7 dias).
+- **Cobertura vacinal por estado** (SI-PNI): tríplice viral (1ª dose), poliomielite e pentavalente, **só até 2022** — o Ministério publica os
+  anos seguintes apenas num painel sem acesso automático. Valores acima de 100% refletem estimativas de população; a linha "Total" do TabNet
+  (soma de percentuais) é descartada.
+- **Vacinação nacional, expectativa de vida e gasto em saúde**: Banco Mundial (fonte **secundária**, de OMS/UNICEF/ONU), só nacional.
+- **Não existe fonte aberta nacional para filas do SUS** (cirurgias, consultas, exames): o Ministério da Saúde ainda prepara um painel nacional
+  (previsto para o fim de 2026) e os números existentes vieram de pedidos via Lei de Acesso à Informação. O painel mostra leitos e diz isso na tela.
+- **Cobertura vacinal por estado depois de 2022**: o Ministério publica só em painéis sem acesso automático; os microdados de doses aplicadas
+  (OpenDataSUS) pesam ~1,4 GB por mês e não trazem a população-alvo, então calcular a cobertura seria uma estimativa nossa, não o dado oficial.
 
 ## 🛒 Preços do dia a dia (aba "Preços do Dia a Dia")
 - **Gasolina por estado e Brasil** (R$/litro, semanal): planilhas oficiais da ANP. O arquivo de estados tem ~13 MB, então o

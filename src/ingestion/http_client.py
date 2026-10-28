@@ -45,6 +45,7 @@ def get_json(
     *,
     json_attempts: int = 3,
     sleep: float = 1.5,
+    timeout: tuple[float, float] | None = None,
 ) -> Any:
     """GET que devolve JSON.
 
@@ -56,7 +57,7 @@ def get_json(
     last_error: Exception | None = None
     for attempt in range(1, json_attempts + 1):
         try:
-            resp = sess.get(url, timeout=HTTP_TIMEOUT)
+            resp = sess.get(url, timeout=timeout or HTTP_TIMEOUT)
             if resp.status_code >= 400:
                 raise IngestionError(f"HTTP {resp.status_code} em {url}")
             return resp.json()

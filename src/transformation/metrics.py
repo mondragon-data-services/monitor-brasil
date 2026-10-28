@@ -148,3 +148,66 @@ def value_days_ago(df: pd.DataFrame, days: int = 365, tolerance_days: int = 10, 
     idx = (clean["date"] - target).abs().idxmin()
     row = clean.loc[idx]
     return float(row[value_col]) if abs((row["date"] - target).days) <= tolerance_days else None
+
+
+def real_minimum_wage(min_wage: pd.DataFrame, ipca_monthly: pd.DataFrame) -> pd.DataFrame:
+    """Salário mínimo em reais de hoje: ``nominal × índice_IPCA(último mês) / índice_IPCA(mês)``.
+
+    Devolve ``date, nominal, real`` mensal. O índice nasce das variações mensais do IPCA (``cumulative_index``); o salário
+    nominal é propagado para frente (ffill) entre reajustes. Meses sem IPCA ficam de fora.
+    """
+    idx = cumulative_index(ipca_monthly)[["date", "value"]].rename(columns={"value": "idx"})
+    sm = min_wage.sort_values("date")[["date", "value"]].rename(columns={"value": "nominal"})
+    merged = pd.merge_asof(idx.sort_values("date"), sm, on="date", direction="backward").dropna(subset=["nominal"])
+    if merged.empty:
+        return pd.DataFrame(columns=["date", "nominal", "real"])
+    merged["real"] = merged["nominal"] * merged["idx"].iloc[-1] / merged["idx"]
+    return merged[["date", "nominal", "real"]].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Dengue (SINAN): semanas completas, acumulados e incidência
+# --------------------------------------------------------------------------- #
+def dengue_national(dengue: pd.DataFrame, uf: str = "BR") -> pd.DataFrame:
+    """Casos/graves/óbitos por semana para o Brasil (soma das UFs) ou para uma UF."""
+    if dengue is None or dengue.empty:
+        return pd.DataFrame(columns=["date", "ano", "semana", "casos", "graves", "obitos"])
+    base = dengue if uf == "BR" else dengue[dengue["uf"] == uf]
+    return (base.groupby(["date", "ano", "semana"], as_index=False)[["casos", "graves", "obitos"]].sum()
+            .sort_values("date").reset_index(drop=True))
+
+
+def dengue_last_complete_week(dengue: pd.DataFrame, trim_weeks: int = 3) -> tuple[int, int] | None:
+    """(ano, semana) da última semana considerada completa: descarta as ``trim_weeks`` mais recentes (atraso de digitação)."""
+    if dengue is None or dengue.empty:
+        return None
+    nat = dengue_national(dengue)
+    keys = list(zip(nat["ano"], nat["semana"], strict=True))
+    if not keys:
+        return None
+    idx = max(0, len(keys) - 1 - trim_weeks)
+    return int(keys[idx][0]), int(keys[idx][1])
+
+
+def dengue_cumulative(dengue: pd.DataFrame, year: int, upto_week: int, uf: str = "BR") -> dict[str, int]:
+    """Total de casos, graves e óbitos do ano até a semana epidemiológica ``upto_week`` (inclusive)."""
+    nat = dengue_national(dengue, uf)
+    sel = nat[(nat["ano"] == year) & (nat["semana"] <= upto_week)]
+    return {"casos": int(sel["casos"].sum()), "graves": int(sel["graves"].sum()), "obitos": int(sel["obitos"].sum())}
+
+
+def dengue_incidence_by_uf(dengue: pd.DataFrame, year: int, upto_week: int, population: dict[str, int]) -> pd.DataFrame:
+    """Casos acumulados e incidência por 100 mil habitantes por UF (``uf, casos, obitos, incidencia``)."""
+    if dengue is None or dengue.empty:
+        return pd.DataFrame(columns=["uf", "casos", "obitos", "incidencia"])
+    sel = dengue[(dengue["ano"] == year) & (dengue["semana"] <= upto_week)]
+    out = sel.groupby("uf", as_index=False)[["casos", "obitos"]].sum()
+    out["incidencia"] = [rate_per_100k(c, population[u]) if u in population else float("nan") for u, c in zip(out["uf"], out["casos"], strict=True)]
+    return out.dropna(subset=["incidencia"]).sort_values("incidencia", ascending=False).reset_index(drop=True)
+
+
+def rolling_sum(df: pd.DataFrame, window: int = 12, value_col: str = "value") -> pd.DataFrame:
+    """Soma móvel (ex.: saldo de vagas em 12 meses); as primeiras ``window-1`` linhas são descartadas."""
+    out = df.sort_values("date").reset_index(drop=True).copy()
+    out[value_col] = out[value_col].rolling(window).sum()
+    return out.dropna(subset=[value_col]).reset_index(drop=True)

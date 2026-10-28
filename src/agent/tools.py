@@ -19,12 +19,26 @@ from src.config import EXPLAINERS
 from src.transformation.metrics import value_days_ago
 
 MAX_POINTS = 60
-MAX_TOOL_OUTPUT_CHARS = 12000
+MAX_TOOL_OUTPUT_CHARS = 16000
 UF_METRICS = ("mvi_taxa", "mvi_total", "feminicidio_total", "estupro_vulneravel_total")
 
 _EXPLAINER_OF_AREA = {"fiscal": ("inflacao", "divida_juros"), "trabalho": ("desemprego", "renda_endividamento", "recessao"),
                       "seguranca": ("mvi", "vulneraveis"), "educacao": ("ideb", "evasao")}
 _EXPLAINER_OF_KEY = {
+    "cambio_dolar": "cambio", "focus_ipca_ano_corrente": "cambio", "focus_ipca_proximo_ano": "cambio",
+    "resultado_primario": "fiscal_resultado", "resultado_nominal": "fiscal_resultado", "juros_da_divida": "fiscal_resultado",
+    "inadimplencia_pf": "credito", "juros_cartao_rotativo": "credito", "juros_cheque_especial": "credito",
+    "salario_minimo": "salario_minimo", "salario_minimo_real": "salario_minimo",
+    "pobreza": "pobreza", "pobreza_extrema": "pobreza", "gini": "pobreza", "inseguranca_alimentar": "fome", "fome_grave": "fome",
+    "informalidade": "informalidade", "carteira_privado": "informalidade", "sem_carteira": "informalidade",
+    "conta_propria": "informalidade", "caged_saldo_mensal": "informalidade", "caged_saldo_12m": "informalidade",
+    "massa_rendimento": "informalidade", "desalento": "informalidade", "bolsa_familia_valor": "bolsa_familia",
+    "dengue_casos_semana": "dengue", "vacina_sarampo": "vacinacao", "vacina_dpt": "vacinacao",
+    "mortalidade_infancia": "mortalidade_infancia", "expectativa_vida": "saude_vida", "gasto_saude_pib": "saude_vida",
+    "gasto_publico_saude_pib": "saude_vida", "leitos_sus_por_mil": "leitos", "leitos_existentes_por_mil": "leitos",
+    "bolsa_familia_familias": "bolsa_familia", "bolsa_familia_beneficio_medio": "bolsa_familia",
+    "bolsa_familia_familias_mensal": "bolsa_familia", "bolsa_familia_valor_medio_familia": "bolsa_familia", "leitos_sus_por_mil": "leitos", "leitos_existentes_por_mil": "leitos",
+    "bolsa_familia_familias": "bolsa_familia", "bolsa_familia_beneficio_medio": "bolsa_familia",
     "ipca_12m": "inflacao", "ipca_alimentacao_12m": "inflacao", "selic_meta": "divida_juros", "juro_real": "divida_juros",
     "divida_bruta": "divida_juros", "divida_liquida": "divida_juros", "desocupacao": "desemprego",
     "subutilizacao": "desemprego", "rendimento_real": "renda_endividamento", "endividamento_familias": "renda_endividamento",
@@ -42,10 +56,18 @@ METHODOLOGY = (
     "Recessão técnica = dois trimestres seguidos de queda do PIB (variação trimestre contra trimestre anterior, dessazonalizada). "
     "PNAD Contínua usa trimestres móveis (ex.: jun-jul-ago). Variação de 12 meses compara com a observação 12 meses antes."
 )
+NOT_AVAILABLE = (
+    "O painel NÃO tem: preço em reais dos alimentos (só variação do IPCA), carne moída (usa acém/patinho), filas de espera do SUS "
+    "(cirurgias, consultas, exames — não há base nacional aberta), cobertura vacinal por estado depois de 2022 (o Ministério só "
+    "publica num painel sem acesso automático), Bolsa Família mensal anterior aos últimos 24 meses processados, previsões próprias."
+)
 QUALITY_NOTE = (
     "Segurança pública: dados oficiais do Sinesp VDE (Ministério da Justiça) quando baixados; em 2015–2017 a cobertura dos "
     "estados pode ser incompleta (afeta sobretudo estupro). Ideb, abandono escolar e 'nem-nem' vêm de um consolidado de "
-    "referência APROXIMADO (INEP/IBGE) — cite sempre essa ressalva ao usá-los."
+    "referência APROXIMADO (INEP/IBGE) — cite sempre essa ressalva ao usá-los. Cobertura vacinal por estado e leitos vêm do TabNet/DATASUS (Ministério "
+    "da Saúde; vacinas só até 2022). Vacinação nacional, expectativa de vida e gasto em saúde "
+    "vêm do Banco Mundial (OMS/UNICEF/ONU): FONTE SECUNDÁRIA, só nacional. Dengue (SINAN): as últimas 3 semanas ficam de fora por "
+    "atraso de registro. " + NOT_AVAILABLE
 )
 
 
@@ -71,7 +93,9 @@ def _when(row: pd.Series, freq: str) -> str:
 def _signal(ind, change: float | None, last: float) -> str:
     if change is None or ind.higher_is_worse is None:
         return "sem_comparacao"
-    if abs(change) < 0.05 or (last and abs(change / last) < 0.01):
+    # estável = variação desprezível: <1% do valor, ou <0,05 p.p. quando a unidade é percentual (o limite absoluto não vale para
+    # índices de escala pequena, como o Gini 0–1)
+    if (last and abs(change / last) < 0.01) or ("%" in ind.unit and abs(change) < 0.05):
         return "estavel"
     worse = (change > 0) == ind.higher_is_worse
     return "piora" if worse else "melhora"
@@ -143,7 +167,16 @@ def get_overview(ctx: DataContext, area: str = "tudo", **_: Any) -> dict[str, An
                       "valor": s["ultimo"]["valor"], "valor_ha_12_meses": prev.get("valor"),
                       "variacao_12m": prev.get("variacao_absoluta"), "leitura_12m": s.get("leitura_12m"),
                       "qualidade_dos_dados": s["qualidade_dos_dados"]})
-    out: dict[str, Any] = {"area": area, "indicadores": snaps, "manchetes_dos_graficos": ctx.chart_headlines(area)}
+    headlines = ctx.chart_headlines(area)
+    if area == "tudo":  # visão geral enxuta: manchetes curtas e no máximo 2 por área
+        per_area: dict[str, int] = {}
+        kept = []
+        for h in headlines:
+            if per_area.get(h["area"], 0) < 2:
+                per_area[h["area"]] = per_area.get(h["area"], 0) + 1
+                kept.append({**h, "titulo_e_subtitulo": h["titulo_e_subtitulo"].split(" — ")[0][:230]})
+        headlines = kept
+    out: dict[str, Any] = {"area": area, "indicadores": snaps, "manchetes_dos_graficos": headlines}
     if area in ("tudo", "trabalho"):
         out["status_recessao_tecnica"] = ctx.recession_status()
     return out
@@ -227,6 +260,169 @@ def get_fuel_by_uf(ctx: DataContext, uf: str | None = None, **_: Any) -> dict[st
             "ranking_decrescente": [{"uf": r.uf, "preco": _num(r.value)} for r in snap.itertuples()]}
 
 
+HEALTH_METRICS = ("dengue_incidencia", "dengue_casos", "mortalidade_infancia", "leitos_sus_por_mil", "leitos_existentes_por_mil",
+                  "cobertura_triplice_viral", "cobertura_polio", "cobertura_penta")
+
+
+def get_health_by_uf(ctx: DataContext, metric: str = "dengue_incidencia", uf: str | None = None, **_: Any) -> dict[str, Any]:
+    """Saúde por estado: dengue (incidência ou casos no ano, até a última semana completa) ou mortalidade de menores de 5 anos."""
+    from src.config import DENGUE_INCOMPLETE_WEEKS, UF_BY_IBGE_CODE
+    from src.ingestion.sinesp_loader import UF_POPULATION
+    from src.transformation.metrics import dengue_cumulative, dengue_incidence_by_uf, dengue_last_complete_week
+    uf = uf.upper() if uf else None
+    if metric in ("leitos_sus_por_mil", "leitos_existentes_por_mil"):
+        from src.visualization.charts import beds_per_thousand
+        if ctx.beds.empty:
+            return {"erro": "dados de leitos indisponíveis"}
+        col = "sus_mil" if metric == "leitos_sus_por_mil" else "existentes_mil"
+        b = beds_per_thousand(ctx.beds)
+        latest = b["date"].max()
+        nat = b[(b["uf"] == "BR") & (b["date"] == latest)][col]
+        base = {"metrica": metric, "referencia": f"{latest:%m/%Y}", "unidade": "leitos por mil habitantes (população do Censo 2022)",
+                "brasil": _num(nat.iloc[0], 2) if len(nat) else None, "fonte": "CNES/Ministério da Saúde via TabNet"}
+        if uf:
+            own = b[b["uf"] == uf].sort_values("date")
+            if own.empty or uf == "BR":
+                return {"erro": f"UF inválida. Use uma de: {', '.join(sorted(u for u in b['uf'].unique() if u != 'BR'))}"}
+            return {**base, "uf": uf, "valor": _num(own.iloc[-1][col], 2),
+                    "serie": [{"periodo": f"{r.date:%Y-%m}", "valor": _num(getattr(r, col), 2)} for r in own.tail(8).itertuples()]}
+        snap = b[(b["date"] == latest) & (b["uf"] != "BR")].sort_values(col, ascending=False)
+        return {**base, "ranking_decrescente": [{"uf": r.uf, "valor": _num(getattr(r, col), 2)} for r in snap.itertuples()]}
+    if metric.startswith("cobertura_"):
+        vac = {"cobertura_triplice_viral": "triplice_viral", "cobertura_polio": "polio", "cobertura_penta": "penta"}[metric]
+        if ctx.pni.empty:
+            return {"erro": "cobertura vacinal por estado indisponível"}
+        v = ctx.pni[ctx.pni["vacina"] == vac]
+        year = v["date"].max()
+        snap = v[v["date"] == year].sort_values("value")
+        base = {"metrica": metric, "ano_do_dado": int(year.year), "unidade": "% de cobertura", "meta_pni": 95,
+                "estados_que_atingiram_a_meta": int((snap["value"] >= 95).sum()), "total_de_estados": int(len(snap)),
+                "observacao": "último ano publicado no TabNet/SI-PNI é 2022; valores acima de 100% refletem estimativas de população",
+                "fonte": "SI-PNI/Ministério da Saúde via TabNet"}
+        if uf:
+            own = v[v["uf"] == uf].sort_values("date")
+            if own.empty:
+                return {"erro": f"UF inválida. Use uma de: {', '.join(sorted(v['uf'].unique()))}"}
+            return {**base, "uf": uf, "valor": _num(own.iloc[-1]["value"], 0),
+                    "serie": [{"ano": int(r.date.year), "valor": _num(r.value, 0)} for r in own.tail(8).itertuples()]}
+        return {**base, "ranking_crescente": [{"uf": r.uf, "valor": _num(r.value, 0)} for r in snap.itertuples()]}
+    if metric == "mortalidade_infancia":
+        m = ctx.mortality
+        if m.empty:
+            return {"erro": "mortalidade na infância indisponível"}
+        year = m["date"].max()
+        snap = m[(m["date"] == year) & (m["geo_code"] != "1")].copy()
+        snap["uf"] = snap["geo_code"].map(UF_BY_IBGE_CODE)
+        nat = m[(m["geo_code"] == "1") & (m["date"] == year)]["value"]
+        base = {"metrica": metric, "ano": int(year.year), "unidade": "óbitos de menores de 5 anos por mil nascidos vivos",
+                "brasil": _num(nat.iloc[0], 1) if len(nat) else None, "fonte": "IBGE (SIDRA 6695)"}
+        if uf:
+            row = snap[snap["uf"] == uf]
+            if row.empty:
+                return {"erro": f"UF inválida. Use uma de: {', '.join(sorted(UF_BY_IBGE_CODE.values()))}"}
+            hist = m[m["geo_code"] == row.iloc[0]["geo_code"]].sort_values("date").tail(8)
+            return {**base, "uf": uf, "valor": _num(row.iloc[0]["value"], 1),
+                    "serie": [{"ano": int(r.date.year), "valor": _num(r.value, 1)} for r in hist.itertuples()]}
+        ranking = snap.sort_values("value", ascending=False)
+        return {**base, "ranking_decrescente": [{"uf": r.uf, "valor": _num(r.value, 1)} for r in ranking.itertuples()]}
+    if metric not in ("dengue_incidencia", "dengue_casos"):
+        return {"erro": f"metrica inválida. Use uma de: {', '.join(HEALTH_METRICS)}"}
+    d = ctx.dengue
+    done = dengue_last_complete_week(d, DENGUE_INCOMPLETE_WEEKS) if not d.empty else None
+    if done is None:
+        return {"erro": "dados de dengue indisponíveis"}
+    year, week = done
+    inc = dengue_incidence_by_uf(d, year, week, UF_POPULATION)
+    base = {"metrica": metric, "ano": year, "ate_a_semana_epidemiologica": week,
+            "observacao": "casos prováveis do SINAN; as últimas semanas de registros são ignoradas por atraso de digitação"}
+    if uf:
+        if uf not in set(inc["uf"]):
+            return {"erro": f"UF inválida. Use uma de: {', '.join(sorted(inc['uf']))}"}
+        cur, prev = dengue_cumulative(d, year, week, uf), dengue_cumulative(d, year - 1, week, uf)
+        row = inc[inc["uf"] == uf].iloc[0]
+        return {**base, "uf": uf, "casos_no_ano": cur["casos"], "casos_mesmo_periodo_ano_anterior": prev["casos"],
+                "obitos_confirmados_no_ano": cur["obitos"], "casos_graves_no_ano": cur["graves"],
+                "incidencia_por_100_mil": _num(row["incidencia"], 0),
+                "posicao_no_ranking_de_incidencia": int(list(inc["uf"]).index(uf)) + 1}
+    br_cur, br_prev = dengue_cumulative(d, year, week), dengue_cumulative(d, year - 1, week)
+    key = "incidencia_por_100_mil" if metric == "dengue_incidencia" else "casos"
+    col = "incidencia" if metric == "dengue_incidencia" else "casos"
+    ranking = inc.sort_values(col, ascending=False)
+    return {**base, "brasil": {"casos_no_ano": br_cur["casos"], "casos_mesmo_periodo_ano_anterior": br_prev["casos"],
+                               "obitos_confirmados_no_ano": br_cur["obitos"]},
+            "ranking_decrescente": [{"uf": r.uf, key: _num(getattr(r, col), 0)} for r in ranking.itertuples()]}
+
+
+def get_bolsa_familia_by_uf(ctx: DataContext, uf: str | None = None, **_: Any) -> dict[str, Any]:
+    """Bolsa Família em dezembro: famílias (benefícios) por UF e por 100 habitantes; benefício médio nacional."""
+    from src.ingestion.sinesp_loader import BRAZIL_POPULATION, UF_POPULATION
+    fam = ctx.pbf_fam
+    if fam.empty:
+        return {"erro": "número de famílias do Bolsa Família indisponível"}
+    year = fam["date"].max()
+    snap = fam[(fam["date"] == year) & (fam["uf"] != "BR")].copy()
+    snap["por_100"] = [v / UF_POPULATION[u] * 100 if u in UF_POPULATION else float("nan") for u, v in zip(snap["uf"], snap["value"], strict=True)]
+    nat = fam[(fam["uf"] == "BR") & (fam["date"] == year)]["value"]
+    prev = fam[(fam["uf"] == "BR") & (fam["date"] == fam[fam["uf"] == "BR"]["date"].sort_values().iloc[-2])]["value"] if len(fam[fam["uf"] == "BR"]) > 1 else []
+    out: dict[str, Any] = {"referencia": f"dezembro de {year.year}", "unidade": "benefícios (famílias) pagos em dezembro",
+                           "brasil": _num(nat.iloc[0], 0) if len(nat) else None, "brasil_ano_anterior": _num(prev.iloc[0], 0) if len(prev) else None,
+                           "brasil_por_100_habitantes": _num(nat.iloc[0] / BRAZIL_POPULATION * 100, 1) if len(nat) else None,
+                           "fonte": "Ministério do Desenvolvimento Social via Ipeadata (FAM_PBF/VAL_PBF)"}
+    avg = ctx.series.get("bolsa_familia_beneficio_medio")
+    if avg is not None and not avg.empty:
+        out["beneficio_medio_nacional_reais"] = {"ano": int(avg.iloc[-1]["date"].year), "valor": _num(avg.iloc[-1]["value"], 0)}
+        out["observacao"] = "o valor médio só existe até o último ano em que o Ipeadata publicou o valor total de dezembro"
+    m = ctx.pbf_m
+    monthly: dict[str, Any] | None = None
+    if not m.empty:
+        mm = m.assign(medio=m["valor"] / m["familias"])
+        last_m = mm["date"].max()
+        monthly = {"mes_mais_recente": f"{last_m:%Y-%m}", "unidade": "famílias com pagamento no mês e R$ por família",
+                   "fonte": "Portal da Transparência/CGU (ETL do painel; famílias = favorecidos distintos)"}
+        out["mensal"] = monthly
+    if uf:
+        uf = uf.upper()
+        row = snap[snap["uf"] == uf]
+        if row.empty:
+            return {"erro": f"UF inválida. Use uma de: {', '.join(sorted(snap['uf']))}"}
+        if monthly is not None:
+            mine = mm[mm["uf"] == uf].sort_values("date")
+            if not mine.empty:
+                monthly.update({"familias": int(mine.iloc[-1]["familias"]), "valor_medio_por_familia_reais": _num(mine.iloc[-1]["medio"], 0),
+                                "serie_mensal": [{"mes": f"{r.date:%Y-%m}", "familias": int(r.familias), "valor_medio": _num(r.medio, 0)} for r in mine.tail(12).itertuples()]})
+        hist = fam[fam["uf"] == uf].sort_values("date").tail(6)
+        return {**out, "uf": uf, "familias": _num(row.iloc[0]["value"], 0), "por_100_habitantes": _num(row.iloc[0]["por_100"], 1),
+                "serie": [{"ano": int(r.date.year), "familias": _num(r.value, 0)} for r in hist.itertuples()]}
+    if monthly is not None:
+        latest = mm[(mm["date"] == last_m) & (mm["uf"] != "BR")].sort_values("medio", ascending=False)
+        br_row = mm[(mm["date"] == last_m) & (mm["uf"] == "BR")]
+        if len(br_row):
+            monthly.update({"brasil_familias": int(br_row.iloc[0]["familias"]), "brasil_valor_medio_por_familia_reais": _num(br_row.iloc[0]["medio"], 0)})
+        monthly["ranking_valor_medio_por_familia"] = [{"uf": r.uf, "valor_medio": _num(r.medio, 0)} for r in latest.itertuples()]
+    ranking = snap.sort_values("por_100", ascending=False)
+    out["ranking_por_100_habitantes"] = [{"uf": r.uf, "familias": _num(r.value, 0), "por_100_habitantes": _num(r.por_100, 1)} for r in ranking.itertuples()]
+    return out
+
+
+def get_market_expectations(ctx: DataContext, **_: Any) -> dict[str, Any]:
+    """Boletim Focus: o que o mercado espera para IPCA, Selic, PIB e dólar (ano corrente e seguintes)."""
+    f = ctx.focus
+    if f.empty:
+        return {"erro": "expectativas do Focus indisponíveis"}
+    last = f["date"].max()
+    snap = f[f["date"] == last]
+    out: dict[str, Any] = {"boletim_de": str(last.date()), "unidades": {"IPCA": "%", "Selic": "% a.a. no fim do ano",
+                                                                          "PIB Total": "% de crescimento", "Câmbio": "R$ por dólar no fim do ano"},
+                           "meta_de_inflacao": "3,0% com tolerância de ±1,5 p.p. (teto 4,5%)", "expectativas": []}
+    for ind in ("IPCA", "Selic", "PIB Total", "Câmbio"):
+        for r in snap[snap["indicador"] == ind].sort_values("ano").itertuples():
+            hist = f[(f["indicador"] == ind) & (f["ano"] == r.ano)][["date", "mediana"]].rename(columns={"mediana": "value"})
+            out["expectativas"].append({"indicador": ind, "ano": int(r.ano), "mediana": _num(r.mediana),
+                                        "minimo": _num(r.minimo), "maximo": _num(r.maximo), "respondentes": _num(r.n, 0),
+                                        "mediana_ha_12_meses": _num(value_days_ago(hist, 365))})
+    return out
+
+
 def get_price_ranking(ctx: DataContext, **_: Any) -> dict[str, Any]:
     """Inflação do dia a dia: itens do IPCA ordenados pela alta em 12 meses + o que R$ 100 de dez/2019 viraram."""
     from src.config import IPCA_ITEMS
@@ -303,6 +499,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     _fn("get_fuel_by_uf", "Preço da gasolina comum por litro (ANP): ranking de todos os estados na última semana, ou a série "
         "recente de UMA UF (sigla de 2 letras) contra a média do Brasil. Use para 'preço da gasolina em SP/por estado'.",
         {"uf": {"type": ["string", "null"]}}, ["uf"]),
+    _fn("get_health_by_uf", "Saúde por estado: dengue (incidência por 100 mil ou casos no ano, comparado ao mesmo período do ano "
+        "anterior) ou mortalidade de menores de 5 anos. Informe a UF (sigla) para um estado ou null para o ranking.",
+        {"metric": {"type": "string", "enum": list(HEALTH_METRICS)}, "uf": {"type": ["string", "null"]}}, ["metric", "uf"]),
+    _fn("get_bolsa_familia_by_uf", "Bolsa Família em dezembro: número de famílias (benefícios) por estado e por 100 habitantes, evolução "
+        "de um estado e benefício médio nacional. Use null em uf para o ranking.", {"uf": {"type": ["string", "null"]}}, ["uf"]),
+    _fn("get_market_expectations", "O que o mercado espera (Boletim Focus) para IPCA, Selic, PIB e dólar no ano corrente e nos "
+        "seguintes, com mínimo, máximo e o valor de 12 meses atrás. Use para 'o que esperam da inflação/juros/dólar/PIB?'.", {}, []),
     _fn("get_price_ranking", "Inflação do dia a dia: todos os itens (arroz, feijão, tomate, frango, carne, leite, café, pão, "
         "gasolina...) ordenados pela alta em 12 meses, quanto R$ 100 de dez/2019 viraram, e o preço da gasolina. Use para "
         "'qual alimento subiu mais?', 'inflação do prato' ou 'como estão os preços?'.", {}, []),
@@ -310,11 +513,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         {"topic": {"type": "string", "enum": [*_KEYS, "metodologia", "qualidade_dos_dados"]}}, ["topic"]),
 ]
 TOOLS = {f.__name__: f for f in (list_indicators, get_overview, get_indicator_snapshot, get_time_series,
-                                 get_security_by_uf, get_fuel_by_uf, get_price_ranking, explain_topic)}
+                                 get_security_by_uf, get_fuel_by_uf, get_health_by_uf, get_bolsa_familia_by_uf, get_market_expectations, get_price_ranking,
+                                 explain_topic)}
 _ENUMS: dict[str, dict[str, set]] = {
     "get_overview": {"area": {"tudo", *AREAS}}, "get_indicator_snapshot": {"indicator": set(_KEYS)},
     "get_time_series": {"indicator": set(_KEYS), "aggregate": {"annual_last", None}},
-    "get_security_by_uf": {"metric": set(UF_METRICS)}, "explain_topic": {"topic": {*_KEYS, "metodologia", "qualidade_dos_dados"}},
+    "get_security_by_uf": {"metric": set(UF_METRICS)}, "get_health_by_uf": {"metric": set(HEALTH_METRICS)}, "explain_topic": {"topic": {*_KEYS, "metodologia", "qualidade_dos_dados"}},
 }
 
 

@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import DATA_PROCESSED, SGS_SERIES, SIDRA_TABLES  # noqa: E402
-from src.ingestion import sync_all  # noqa: E402
+from src.ingestion import extra_jobs, sync_all  # noqa: E402
 
 ICON = {"live": "OK  ao vivo", "cache": "!!  cache  ", "fallback": "--  consolid.", "missing": "XX  FALHOU  "}
 
@@ -28,6 +28,8 @@ def main() -> int:
     parser.add_argument("--sinesp", action="store_true", help="baixa e processa o Sinesp VDE oficial (gov.br)")
     parser.add_argument("--sinesp-years", type=int, nargs="+", metavar="ANO", help="anos do Sinesp (padrão: todos)")
     parser.add_argument("--force-sinesp", action="store_true", help="rebaixa mesmo anos já em cache")
+    parser.add_argument("--bolsa-familia", action="store_true", help="ETL mensal do Bolsa Família (Portal da Transparência, ~330 MB/mês)")
+    parser.add_argument("--pbf-months", type=int, default=24, help="quantos meses recentes processar (padrão 24)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.ERROR, format="%(levelname)s %(message)s")
@@ -42,6 +44,11 @@ def main() -> int:
         for y in report.years:
             print(f"{y.year:<6}{y.status:<14}{y.rows:>7}  {y.detail}")
         print(f"Sinesp VDE combinado: {report.combined_rows} linhas\n")
+    if args.bolsa_familia:
+        from src.ingestion.bolsa_familia_download import recent_months, sync_bolsa_familia  # noqa: E402 - importação tardia
+
+        rep = sync_bolsa_familia(recent_months(args.pbf_months), progress=lambda msg, frac: print(f"[{frac:4.0%}] {msg}", flush=True))
+        print("\nBolsa Família mensal:", ", ".join(f"{ym}={st}" for ym, st in rep), "\n")
     results = sync_all(include_ipea=not args.no_ipea)
 
     print(f"{'fonte':<26}{'status':<14}{'linhas':>7}  último dado")
@@ -53,7 +60,7 @@ def main() -> int:
             last = str(int(res.df["ano"].max()))
         print(f"{key:<26}{ICON[res.mode]:<14}{len(res.df):>7}  {last}  {res.detail if res.mode != 'live' else ''}")
 
-    essential = [*SGS_SERIES, *SIDRA_TABLES, "anp_gasolina", "ipca_itens"]
+    essential = [*SGS_SERIES, *SIDRA_TABLES, "anp_gasolina", "ipca_itens", "focus", *extra_jobs()]
     missing = [k for k in essential if not results[k].ok]
     files = sorted(p.name for p in DATA_PROCESSED.glob("*.parquet"))
     print(f"\n{len(files)} arquivos Parquet em {DATA_PROCESSED}")

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -51,6 +51,20 @@ def load_parquet(key: str, base: Path | None = None) -> tuple[pd.DataFrame, date
         log.warning("parquet ilegível %s: %s", path, exc)
         return None
     return df, datetime.fromtimestamp(path.stat().st_mtime)
+
+
+def with_freshness(key: str, fetch, max_age_days: float, base: Path | None = None, force: bool = False) -> FetchResult:
+    """Como ``with_disk_fallback``, mas só consulta a fonte quando o Parquet passa de ``max_age_days``.
+
+    Para fontes pesadas ou que mudam pouco (ex.: 20 MB do Ipeadata, TabNet): o cache válido devolve ``mode="cache"`` com
+    ``detail`` começando por "cache válido" (o app trata como em dia).
+    """
+    cached = load_parquet(key, base)
+    if cached is not None and not force:
+        df, synced = cached
+        if datetime.now() - synced < timedelta(days=max_age_days):
+            return FetchResult(key, df, "cache", synced, f"cache válido (atualiza a cada {max_age_days:g} dias)")
+    return with_disk_fallback(key, fetch, base)
 
 
 def with_disk_fallback(key: str, fetch, base: Path | None = None) -> FetchResult:

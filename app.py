@@ -10,17 +10,21 @@ import streamlit as st
 from src.config import (
     APP_TITLE,
     IPCA_ITEMS,
+    DENGUE_INCOMPLETE_WEEKS,
     EXPLAINERS,
+    FOCUS_INDICATORS,
     PALETTE,
     PERIOD_OPTIONS,
     SGS_SERIES,
     SIDRA_TABLES,
 )
 from src.agent.ui import open_agent, render_agent_tab, sidebar_agent_button
+from src.ingestion import extra_jobs
 from src.ingestion.anp_client import get_anp_gasolina
 from src.ingestion.bcb_client import get_bcb_series
 from src.ingestion.cache import FetchResult
 from src.ingestion.http_client import build_session
+from src.ingestion.focus_client import get_focus
 from src.ingestion.ibge_client import get_ibge_series
 from src.ingestion.ipca_itens_client import get_ipca_items
 from src.ingestion.sinesp_download import sync_sinesp_vde
@@ -70,6 +74,9 @@ def load_everything() -> dict[str, FetchResult]:
         futures = {k: pool.submit(fn, key, None, build_session()) for k, (fn, key) in jobs.items()}
         futures["anp_gasolina"] = pool.submit(get_anp_gasolina, None, build_session())
         futures["ipca_itens"] = pool.submit(get_ipca_items, None, build_session())
+        futures["focus"] = pool.submit(get_focus, None, build_session())
+        for key, job in extra_jobs().items():  # pobreza, trabalho, saúde, dengue
+            futures[key] = pool.submit(job, build_session())
         out: dict[str, FetchResult] = {k: f.result() for k, f in futures.items()}
     out["seguranca_educacao"] = load_security()
     return out
@@ -125,9 +132,10 @@ with st.sidebar:
     data = load_everything()
     st.markdown("#### Status das fontes")
     st.markdown(
-        status_badge("Banco Central", [data[k] for k in SGS_SERIES]) + "<br>"
+        status_badge("Banco Central", [*(data[k] for k in SGS_SERIES), data["focus"]]) + "<br>"
         + status_badge("IBGE", [data[k] for k in SIDRA_TABLES]) + "<br>"
         + status_badge("Preços (ANP/IBGE)", [data["anp_gasolina"], data["ipca_itens"]]) + "<br>"
+        + status_badge("Social e saúde", [data[k] for k in extra_jobs()]) + "<br>"
         + sinesp_badge(data["seguranca_educacao"]),
         unsafe_allow_html=True,
     )
@@ -248,7 +256,7 @@ def quality_notice(frame: pd.DataFrame, pattern: str) -> None:
 # Header + Termômetro do Brasil Hoje
 # --------------------------------------------------------------------------- #
 st.title("🇧🇷 Monitor Brasil")
-st.markdown(f"<p class='mb-sub'>{APP_TITLE.split('—', 1)[1].strip()} · inflação, emprego, segurança e educação em linguagem simples.</p>",
+st.markdown(f"<p class='mb-sub'>{APP_TITLE.split('—', 1)[1].strip()} · preços, emprego, pobreza, segurança, educação e saúde em linguagem simples.</p>",
             unsafe_allow_html=True)
 st.subheader("🌡️ Termômetro do Brasil Hoje")
 k1, k2, k3, k4, k5 = st.columns(5)
@@ -305,9 +313,9 @@ with k5:
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab_prices, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab_prices, tab_social, tab_health, tab5 = st.tabs([
     "💰 Inflação, Juros e Risco Fiscal", "👷 Emprego, Renda e Recessão", "🚨 Segurança e Vulneráveis",
-    "🎓 Educação e Futuro", "🛒 Preços do Dia a Dia", "🤖 Agente Monitora Brasil"])
+    "🎓 Educação e Futuro", "🛒 Preços do Dia a Dia", "🤝 Pobreza e Desigualdade", "🏥 Saúde", "🤖 Agente Monitora Brasil"])
 
 # --------------------------- Aba 1 ------------------------------------------ #
 with tab1:
@@ -315,7 +323,31 @@ with tab1:
     explainer("inflacao")
     plot(charts.debt_chart(df("divida_bruta"), real_rate, start, show_events), "divida")
     explainer("divida_juros")
+    st.markdown("### 💵 Dólar e o que o mercado espera")
+    snap = charts.focus_snapshot(df("focus"))
+    if not snap.empty:
+        cols = st.columns(len(FOCUS_INDICATORS))
+        years = sorted(snap["ano"].unique())[:2]
+        for col, (ind, label) in zip(cols, FOCUS_INDICATORS.items(), strict=True):
+            now = snap[(snap["indicador"] == ind) & (snap["ano"] == years[0])]["mediana"]
+            nxt = snap[(snap["indicador"] == ind) & (snap["ano"] == years[1])]["mediana"] if len(years) > 1 else []
+            if len(now):
+                fmt = (lambda v: f"R$ {br(v, 2)}") if ind == "Câmbio" else (lambda v: f"{br(v, 2)}%")
+                col.metric(f"{label.split(' (')[0]} esperado — {int(years[0])}", fmt(now.iloc[0]))
+                if len(nxt):
+                    col.caption(f"Para {int(years[1])}: **{fmt(nxt.iloc[0])}**")
+        st.caption(f"Mediana das projeções do Boletim Focus em {snap['date'].max():%d/%m/%Y}.")
+    plot(charts.focus_ipca_chart(df("focus"), start), "focus_ipca")
+    plot(charts.dollar_chart(df("cambio_dolar"), df("focus"), start, show_events), "dolar")
+    explainer("cambio")
+    st.markdown("### 🧾 Resultado fiscal: quanto o governo gasta a mais e quanto vai para juros")
+    plot(charts.fiscal_result_chart(df("resultado_primario"), df("resultado_nominal"), start, show_events), "fiscal_resultado")
+    explainer("fiscal_resultado")
     data_section("inflacao_fiscal", {
+        "Dólar (R$)": filter_period(df("cambio_dolar"), option),
+        "Resultado primário 12m (% PIB, déficit +)": filter_period(df("resultado_primario"), option),
+        "Resultado nominal 12m (% PIB, déficit +)": filter_period(df("resultado_nominal"), option),
+        "Focus — expectativas (mediana)": filter_period(df("focus"), option),
         "IPCA 12m (%)": filter_period(ipca_12, option), "Alimentação 12m (%)": filter_period(food_12, option),
         "INPC mensal (%)": filter_period(df("inpc_mensal"), option),
         "Dívida bruta (% PIB)": filter_period(df("divida_bruta"), option),
@@ -336,7 +368,17 @@ with tab2:
                 unsafe_allow_html=True)
     plot(fig_rec, "recessao")
     explainer("recessao")
+    st.markdown("### 💳 Crédito das famílias: inadimplência e juros")
+    plot(charts.credit_chart(df("inadimplencia_pf"), df("juros_cartao_rotativo"), df("juros_cheque_especial"), start, show_events), "credito")
+    explainer("credito")
+    st.markdown("### 💼 Quanto o salário mínimo realmente compra")
+    plot(charts.min_wage_chart(df("salario_minimo"), df("ipca_mensal"), start), "salario_minimo")
+    explainer("salario_minimo")
     data_section("emprego_renda", {
+        "Inadimplência PF (%)": filter_period(df("inadimplencia_pf"), option),
+        "Juros do cartão rotativo (% a.a.)": filter_period(df("juros_cartao_rotativo"), option),
+        "Juros do cheque especial (% a.a.)": filter_period(df("juros_cheque_especial"), option),
+        "Salário mínimo nominal (R$)": filter_period(df("salario_minimo"), option),
         "Desocupação (%)": filter_period(df("desocupacao"), option), "Subutilização (%)": filter_period(df("subutilizacao"), option),
         "Rendimento real (R$)": filter_period(df("rendimento_real"), option),
         "Endividamento famílias (%)": filter_period(df("endividamento_familias"), option),
@@ -383,15 +425,26 @@ with tab_prices:
     st.markdown("### 🛒 Inflação do prato e do tanque: item por item")
     st.caption("O IBGE publica a **variação** do preço de cada item (não o preço em reais). Por isso mostramos quanto "
                "cada item subiu — e quanto custa hoje o que custava R$ 100 em dezembro de 2019.")
-    plot(charts.items_inflation_chart(items), "itens_12m")
-    plot(charts.real_cost_chart(items), "itens_custo")
-    options = [k for k, v in IPCA_ITEMS.items() if v.group != "referencia" or k == "alimentacao_domicilio"]
+    plate = ("comida", "combustivel", "referencia")
+    plot(charts.items_inflation_chart(items, plate), "itens_12m")
+    plot(charts.real_cost_chart(items, plate), "itens_custo")
+    options = [k for k, v in IPCA_ITEMS.items() if v.group in ("comida", "combustivel") or k == "alimentacao_domicilio"]
     chosen = st.multiselect("Itens para comparar no tempo", options, default=["tomate", "cafe", "arroz", "carne_acem"],
                             format_func=lambda k: IPCA_ITEMS[k].label, key="itens_sel")
     plot(charts.items_timeline_chart(items, chosen, start, show_events), "itens_tempo")
     st.caption("ℹ️ O IPCA não tem 'carne moída': usamos acém e patinho, os cortes mais comuns para moer. "
                "Feijão: carioca (o mais consumido) e preto. Frango: inteiro e em pedaços.")
     explainer("precos_itens")
+
+    st.markdown("### 🏠 Contas fixas da casa: energia, gás, aluguel, saúde e transporte")
+    bills = ("casa", "saude", "transporte")
+    plot(charts.items_inflation_chart(items, bills), "contas_12m")
+    plot(charts.real_cost_chart(items, bills), "contas_custo")
+    bill_opts = [k for k, v in IPCA_ITEMS.items() if v.group in bills]
+    bill_sel = st.multiselect("Contas para comparar no tempo", bill_opts, default=["energia", "aluguel", "plano_saude", "gas_botijao"],
+                              format_func=lambda k: IPCA_ITEMS[k].label, key="contas_sel")
+    plot(charts.items_timeline_chart(items, bill_sel, start, show_events), "contas_tempo")
+    explainer("contas_casa")
     from src.transformation.metrics import split_items as _split_items
     acc_long = pd.concat([accumulated_12m(d).dropna().assign(item=k) for k, d in _split_items(items).items()],
                          ignore_index=True) if not items.empty else items
@@ -399,6 +452,144 @@ with tab_prices:
         "Gasolina comum ANP (R$/litro, semanal)": filter_period(anp, option),
         "IPCA por item — variação mensal (%)": filter_period(items, option),
         "IPCA por item — acumulado 12m (%)": filter_period(acc_long, option) if not items.empty else acc_long,
+    })
+
+# --------------------------- Aba Pobreza e Desigualdade --------------------- #
+with tab_social:
+    pov, ext, gini = df("ipea_pobreza"), df("ipea_pobreza_extrema"), df("soc_gini")
+    food, inf, pos = df("soc_inseguranca_alimentar"), df("soc_informalidade"), df("soc_posicao_ocupacao")
+    caged, mass, disc, bolsa = df("ipea_caged_saldo"), df("soc_massa_rendimento"), df("soc_desalento"), df("ipea_bolsa_familia")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    if not pov.empty:
+        d = latest_with_delta(pov, 1)
+        k1.metric("Pobreza (< US$ 8,30/dia)", br_pct(d.latest, 1), br_pp(d.change) if d.change == d.change else None, delta_color="inverse")
+    if not ext.empty:
+        d = latest_with_delta(ext, 1)
+        k2.metric("Extrema pobreza (< US$ 3/dia)", br_pct(d.latest, 1), br_pp(d.change) if d.change == d.change else None, delta_color="inverse")
+    if not gini.empty:
+        d = latest_with_delta(gini, 1)
+        k3.metric("Desigualdade (Gini)", br(d.latest, 3), br(d.change, 3, signed=True) if d.change == d.change else None, delta_color="inverse")
+    if not inf.empty:
+        d = latest_with_delta(inf, 12)
+        k4.metric("Informalidade", br_pct(d.latest, 1), br_pp(d.change) if d.change == d.change else None, delta_color="inverse")
+    if not food.empty:
+        grave = food[food["cat_code"] == "109102"].sort_values("date")
+        if not grave.empty:
+            d = latest_with_delta(grave, 1)
+            k5.metric("Fome (insegurança grave)", br_pct(d.latest, 1), br_pp(d.change) if d.change == d.change else None, delta_color="inverse")
+    st.markdown("### 🧺 Pobreza, desigualdade e fome")
+    plot(charts.poverty_chart(pov, ext), "pobreza")
+    plot(charts.gini_chart(gini), "gini")
+    explainer("pobreza")
+    plot(charts.food_insecurity_chart(food), "fome")
+    explainer("fome")
+    st.markdown("### 💼 Qualidade do emprego: carteira, informalidade e vagas")
+    plot(charts.informality_chart(inf, start), "informalidade")
+    plot(charts.job_quality_chart(pos, start), "carteira")
+    plot(charts.caged_chart(caged, start), "caged")
+    explainer("informalidade")
+    plot(charts.income_mass_chart(mass, disc, start), "massa_renda")
+    st.markdown("### 🤲 Bolsa Família")
+    plot(charts.bolsa_familia_chart(bolsa, start), "bolsa_familia")
+    pbf_fam, pbf_val = df("ipea_pbf_familias"), df("ipea_pbf_valor_dez")
+    plot(charts.pbf_chart(pbf_fam, pbf_val), "pbf_familias")
+    plot(charts.pbf_uf_chart(pbf_fam), "pbf_uf")
+    pbf_m = df("pbf_mensal")
+    if pbf_m.empty:
+        st.info("A série mensal de famílias e do valor médio por estado ainda não foi processada. "
+                "Rode `python scripts/sync_data.py --bolsa-familia` (baixa ~330 MB por mês do Portal da Transparência).", icon="ℹ️")
+    else:
+        pbf_ufs = sorted(u for u in pbf_m["uf"].unique() if u != "BR")
+        pbf_uf = st.selectbox("Estado (Bolsa Família mensal)", ["BR"] + pbf_ufs, format_func=lambda x: "Brasil" if x == "BR" else x, key="pbfm_uf")
+        plot(charts.pbf_monthly_chart(pbf_m, pbf_uf), "pbf_mensal")
+        plot(charts.pbf_avg_uf_chart(pbf_m, None if pbf_uf == "BR" else pbf_uf), "pbf_valor_medio_uf")
+    explainer("bolsa_familia")
+    st.caption("Séries anuais: famílias e benefício médio de dezembro (Ipeadata). Série mensal por estado: ETL do Portal da Transparência "
+               "(últimos 24 meses; famílias = favorecidos distintos). Os dois cálculos de valor médio podem diferir um pouco.")
+    data_section("pobreza_trabalho", {
+        "Pobreza US$ 8,30/dia (%)": pov, "Extrema pobreza US$ 3,00/dia (%)": ext, "Gini": gini,
+        "Insegurança alimentar (% domicílios)": food, "Informalidade (%)": filter_period(inf, option),
+        "Ocupados por posição (mil pessoas)": filter_period(pos, option), "Saldo do Caged (vagas)": filter_period(caged, option),
+        "Massa de rendimento (R$ milhões)": filter_period(mass, option), "Desalento (%)": filter_period(disc, option),
+        "Bolsa Família — valor total (R$ mil)": filter_period(bolsa, option),
+        "Bolsa Família — benefícios em dezembro (Brasil e UF)": pbf_fam, "Bolsa Família — valor em dezembro (R$ mil)": pbf_val,
+        "Bolsa Família mensal por UF (famílias, pagamentos, valor R$)": pbf_m,
+    })
+
+# --------------------------- Aba Saúde -------------------------------------- #
+with tab_health:
+    dengue, vac, vac_dpt = df("dengue"), df("wb_vacina_sarampo"), df("wb_vacina_dpt")
+    mort, life = df("soc_mortalidade_infancia"), df("wb_expectativa_vida")
+    spend, spend_pub = df("wb_gasto_saude_pib"), df("wb_gasto_publico_saude_pib")
+    from src.transformation.metrics import dengue_cumulative, dengue_last_complete_week
+    h1, h2, h3, h4, h5 = st.columns(5)
+    done = dengue_last_complete_week(dengue, DENGUE_INCOMPLETE_WEEKS)
+    if done:
+        cur, prev = dengue_cumulative(dengue, done[0], done[1]), dengue_cumulative(dengue, done[0] - 1, done[1])
+        pct = (cur["casos"] / prev["casos"] - 1) * 100 if prev["casos"] else None
+        h1.metric(f"Dengue em {done[0]} (até sem. {done[1]})", br(cur["casos"], 0), br_pct(pct, 0, signed=True) if pct is not None else None,
+                  delta_color="inverse", help="Casos prováveis; variação contra o mesmo período do ano anterior.")
+    if not vac.empty:
+        d = latest_with_delta(vac, 1)
+        h2.metric("Vacina contra sarampo", br_pct(d.latest, 0), br_pp(d.change) if d.change == d.change else None, delta_color="normal",
+                  help="Meta do PNI: 95%.")
+    if not mort.empty:
+        nat = mort[mort["geo_code"] == "1"]
+        if not nat.empty:
+            d = latest_with_delta(nat, 1)
+            h3.metric("Mortes de menores de 5 anos", f"{br(d.latest, 1)} por mil", br(d.change, 1, signed=True) if d.change == d.change else None,
+                      delta_color="inverse")
+    if not life.empty:
+        d = latest_with_delta(life, 1)
+        h4.metric("Expectativa de vida", f"{br(d.latest, 1)} anos", f"{br(d.change, 1, signed=True)} ano(s)" if d.change == d.change else None,
+                  delta_color="normal")
+    if not spend.empty:
+        h5.metric("Gasto total em saúde", br_pct(spend.iloc[-1]["value"], 1) + " do PIB")
+        if not spend_pub.empty:
+            h5.caption(f"Setor público: **{br_pct(spend_pub.iloc[-1]['value'], 1)}** do PIB ({spend_pub.iloc[-1]['date'].year})")
+    st.markdown("### 🦟 Dengue")
+    dengue_ufs = sorted(dengue["uf"].unique()) if not dengue.empty else []
+    d_uf = st.selectbox("Estado", ["BR"] + dengue_ufs, format_func=lambda x: "Brasil" if x == "BR" else x, key="dengue_uf")
+    plot(charts.dengue_weekly_chart(dengue, d_uf, DENGUE_INCOMPLETE_WEEKS), "dengue_semanas")
+    plot(charts.dengue_uf_chart(dengue, None if d_uf == "BR" else d_uf, DENGUE_INCOMPLETE_WEEKS), "dengue_ufs")
+    explainer("dengue")
+    st.markdown("### 💉 Vacinação")
+    plot(charts.vaccine_chart(vac, vac_dpt), "vacinas")
+    explainer("vacinacao")
+    st.caption("Indicador nacional da OMS/UNICEF (Banco Mundial). Mais abaixo há a cobertura por estado do SI-PNI, até 2022.")
+    st.markdown("### 👶 Mortalidade na infância")
+    names = {r.geo_code: r.geo_name for r in mort[["geo_code", "geo_name"]].drop_duplicates().itertuples()} if not mort.empty else {}
+    m_code = st.selectbox("Estado ", ["1"] + sorted((c for c in names if c != "1"), key=lambda c: names[c]),
+                          format_func=lambda c: "Brasil" if c == "1" else names.get(c, c), key="mort_uf")
+    plot(charts.child_mortality_chart(mort, m_code), "mortalidade_serie")
+    plot(charts.child_mortality_ranking_chart(mort, None if m_code == "1" else m_code), "mortalidade_ranking")
+    explainer("mortalidade_infancia")
+    st.markdown("### 🏨 Leitos hospitalares")
+    beds, pni = df("tabnet_leitos"), df("tabnet_pni")
+    bed_ufs = sorted(u for u in beds["uf"].unique() if u != "BR") if not beds.empty else []
+    b_uf = st.selectbox("Estado  ", ["BR"] + bed_ufs, format_func=lambda x: "Brasil" if x == "BR" else x, key="beds_uf")
+    plot(charts.beds_chart(beds, b_uf), "leitos_serie")
+    plot(charts.beds_ranking_chart(beds, None if b_uf == "BR" else b_uf), "leitos_ranking")
+    explainer("leitos")
+    st.caption("O número de leitos não mostra as filas: não existe base nacional aberta de filas do SUS (cirurgias, consultas, exames).")
+    st.markdown("### 💉 Cobertura vacinal por estado")
+    vac_label = {"triplice_viral": "Tríplice viral (1ª dose)", "polio": "Poliomielite", "penta": "Pentavalente"}
+    v_key = st.selectbox("Vacina", list(vac_label), format_func=vac_label.get, key="vac_uf_key")
+    pni_ufs = sorted(pni["uf"].unique()) if not pni.empty else []
+    v_uf = st.selectbox("Estado   ", pni_ufs or ["SP"], key="vac_uf_sel")
+    plot(charts.vaccine_uf_chart(pni, v_key, v_uf), "vacina_ranking")
+    plot(charts.vaccine_uf_series_chart(pni, v_key, v_uf), "vacina_serie_uf")
+    explainer("vacinacao_uf")
+    st.caption("O Ministério da Saúde só publica a cobertura por estado no TabNet até **2022**; a partir de 2023 os dados ficam em um painel "
+               "sem acesso automático. Por isso este bloco termina em 2022 (o indicador nacional acima vai até 2024).")
+    st.markdown("### 🧓 Quanto vivemos e quanto gastamos com saúde")
+    plot(charts.life_expectancy_chart(life), "expectativa_vida")
+    explainer("saude_vida")
+    data_section("saude", {
+        "Dengue por semana e UF (SINAN)": filter_period(dengue, option), "Vacina sarampo (%)": vac, "Vacina DTP (%)": vac_dpt,
+        "Mortalidade menores de 5 anos (por mil)": mort, "Expectativa de vida (anos)": life,
+        "Gasto total em saúde (% PIB)": spend, "Gasto público em saúde (% PIB)": spend_pub,
+        "Leitos por UF (existentes e SUS)": beds, "Cobertura vacinal por UF (%)": pni,
     })
 
 # --------------------------- Aba Agente ------------------------------------- #

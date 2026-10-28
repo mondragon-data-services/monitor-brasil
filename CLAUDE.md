@@ -38,6 +38,26 @@ educação (INEP). Especificação original: `docs/meta_prompt_monitor_brasil_mv
   SIDRA 7060). O IBGE só dá VARIAÇÃO — nunca apresentar como preço em reais. Códigos dos itens em `config.IPCA_ITEMS`.
 - Itens novos do agente com `core=False` ficam fora da visão geral (mantém o contexto enxuto).
 
+## Social e saúde
+- Fontes novas ficam em `ingestion/__init__.py::extra_jobs()` (chaves `soc_*`, `ipea_*`, `wb_*`, `dengue`); app e `sync_data.py` usam a mesma lista.
+- SIDRA com dimensões extras: `ibge_client.parse_sidra_dims` (a categoria é a ÚLTIMA dimensão extra). Ipeadata com níveis: `level="Brasil"`.
+- TabNet (`ingestion/tabnet_client.py`): lê o formulário, monta o POST com os valores EXATOS do formulário (latin-1) e interpreta o `<PRE>` (CNES) ou o
+  link do CSV (SI-PNI). SI-PNI só vai até 2022. Fontes pesadas usam `cache.with_freshness` (cache por validade).
+- Dengue: nunca mostrar as últimas 3 semanas (incompletas). Banco Mundial é fonte secundária — dizer isso na tela.
+- Catálogo do agente: indicadores anuais de **segurança/educação** vêm do consolidado (`_ANNUAL_FROM_SEC`); os demais anuais têm série própria
+  em `build_context` (um laço antigo sobrescrevia todos — não reintroduzir).
+
+## Bolsa Família mensal (ETL manual)
+- `ingestion/bolsa_familia_download.py`: baixa o zip mensal do Portal da Transparência, agrega por UF e descarta. NÃO roda no app; use
+  `python scripts/sync_data.py --bolsa-familia`. Valide sempre o total do mês contra o Ipeadata `VAL_PBF12`.
+- Ao aplicar patches em scripts, cuidado com âncoras contidas no texto novo: reaplicar duplica blocos (já aconteceu em `tools.py`/`context.py`).
+
+## Cuidado com sinais e códigos (já causaram erro)
+- Resultado primário/nominal do BCB: **positivo = déficit** (NFSP). Confira nome da série no catálogo
+  (`dadosabertos.bcb.gov.br/api/3/action/package_search?q=<codigo>`) antes de usar um código novo — 21082 é inadimplência TOTAL
+  (a PF é 21084) e 20742 NÃO é o rotativo do cartão (é 22022).
+- Focus: `baseCalculo eq 0`; indicadores `IPCA`, `Selic`, `PIB Total`, `Câmbio`.
+
 ## Divergências conhecidas do meta-prompt (APIs reais, verificadas em 26/10/2026)
 - Subutilização: tabela **6441** v4118 (a 6438/v4118 devolve HTTP 400).
 - PIB: além da 6562 (acum. 4 tri), usamos 6564 (trimestre/trimestre dessaz.) para o detector de recessão.

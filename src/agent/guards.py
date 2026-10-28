@@ -8,9 +8,9 @@ from dataclasses import dataclass
 MAX_INPUT_CHARS = 400
 MAX_OUTPUT_CHARS = 2400
 
-REFUSAL = ("Sou o Agente Monitora Brasil e só respondo sobre os dados e gráficos deste painel: inflação, juros, dívida, "
-           "emprego, renda, PIB, segurança pública e educação. Tente, por exemplo: “Como está a segurança pública?” "
-           "ou “Como está o endividamento?”.")
+REFUSAL = ("Sou o Agente Monitora Brasil e só respondo sobre os dados e gráficos deste painel: inflação e preços, juros, "
+           "dívida, emprego, renda, pobreza, PIB, segurança pública, educação e saúde. Tente, por exemplo: “Como está a "
+           "segurança pública?” ou “Qual alimento subiu mais?”.")
 INJECTION_REFUSAL = ("Não posso atender a esse tipo de pedido. Posso responder perguntas sobre os indicadores e gráficos do "
                      "painel — por exemplo: “Como está o PIB?”.")
 
