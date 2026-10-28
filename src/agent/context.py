@@ -11,6 +11,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from src.config import IPCA_ITEMS
+from src.config import IPCA_ITEMS
 from src.ingestion.cache import FetchResult
 from src.transformation.metrics import accumulated_12m, build_real_interest, detect_recession
 from src.visualization import charts
@@ -20,6 +22,7 @@ AREAS: dict[str, str] = {
     "trabalho": "Emprego, renda e atividade econômica",
     "seguranca": "Segurança pública e vulneráveis",
     "educacao": "Educação",
+    "precos": "Preços do dia a dia (gasolina e alimentos)",
 }
 
 
@@ -34,10 +37,11 @@ class Indicator:
     higher_is_worse: bool | None
     source: str
     description: str
+    core: bool = True    # False = só aparece na visão da própria área (mantém a visão geral compacta)
 
 
-def _ind(*a) -> Indicator:
-    return Indicator(*a)
+def _ind(*a, **kw) -> Indicator:
+    return Indicator(*a, **kw)
 
 
 CATALOG: dict[str, Indicator] = {
@@ -89,6 +93,32 @@ CATALOG: dict[str, Indicator] = {
     )
 }
 
+# Preços do dia a dia: gasolina (ANP) e inflação acumulada em 12 meses por item do IPCA (IBGE)
+CATALOG["gasolina_brasil"] = _ind(
+    "gasolina_brasil", "Preço médio da gasolina comum no Brasil", "R$/litro", "precos", "semanal", 52, True,
+    "ANP — Levantamento de Preços de Combustíveis (síntese semanal)",
+    "Preço médio de revenda da gasolina comum em milhares de postos; por estado use get_fuel_by_uf.")
+for _key, _item in IPCA_ITEMS.items():
+    if _key != "geral":
+        CATALOG[f"ipca_item_{_key}_12m"] = _ind(
+            f"ipca_item_{_key}_12m", f"IPCA — {_item.label}: acumulado em 12 meses", "%", "precos", "mensal", 12, True,
+            "IBGE — IPCA por item (SIDRA 7060)",
+            (_item.note or "Inflação acumulada em 12 meses do item.") + " O IBGE publica variação, não preço em reais.",
+            core=False)
+
+# Preços do dia a dia: gasolina (ANP) e inflação acumulada em 12 meses por item do IPCA (IBGE)
+CATALOG["gasolina_brasil"] = _ind(
+    "gasolina_brasil", "Preço médio da gasolina comum no Brasil", "R$/litro", "precos", "semanal", 52, True,
+    "ANP — Levantamento de Preços de Combustíveis (síntese semanal)",
+    "Preço médio de revenda da gasolina comum em milhares de postos; por estado use get_fuel_by_uf.")
+for _key, _item in IPCA_ITEMS.items():
+    if _key != "geral":
+        CATALOG[f"ipca_item_{_key}_12m"] = _ind(
+            f"ipca_item_{_key}_12m", f"IPCA — {_item.label}: acumulado em 12 meses", "%", "precos", "mensal", 12, True,
+            "IBGE — IPCA por item (SIDRA 7060)",
+            (_item.note or "Inflação acumulada em 12 meses do item.") + " O IBGE publica variação, não preço em reais.",
+            core=False)
+
 # Indicadores de segurança/educação que vêm do consolidado anual (coluna "indicador")
 _ANNUAL_FROM_SEC = [k for k, v in CATALOG.items() if v.freq == "anual"]
 
@@ -102,6 +132,10 @@ class DataContext:
     sec: pd.DataFrame = field(default_factory=pd.DataFrame)       # consolidado de segurança/educação (inclui UFs)
     freshness: dict[str, str] = field(default_factory=dict)       # fonte -> "ao vivo em ..." | "cache de ..."
     raw: dict[str, pd.DataFrame] = field(default_factory=dict)    # séries brutas usadas pelos gráficos
+    anp: pd.DataFrame = field(default_factory=pd.DataFrame)       # gasolina: date, uf (BR + estados), value
+    items: pd.DataFrame = field(default_factory=pd.DataFrame)     # IPCA por item (longo): date, item, value
+    anp: pd.DataFrame = field(default_factory=pd.DataFrame)       # gasolina: date, uf (BR + estados), value
+    items: pd.DataFrame = field(default_factory=pd.DataFrame)     # IPCA por item (longo): date, item, value
 
     def has(self, key: str) -> bool:
         return key in self.series and not self.series[key].empty
@@ -126,6 +160,12 @@ class DataContext:
                 out.append(("educacao", "Abandono escolar e nem-nem", charts.dropout_chart(sec)))
         except KeyError:
             pass
+        if not self.anp.empty:
+            out.append(("precos", "Gasolina (Brasil)", charts.gasoline_chart(self.anp, "BR")))
+            out.append(("precos", "Ranking da gasolina por estado", charts.gasoline_ranking_chart(self.anp, None)))
+        if not self.items.empty:
+            out.append(("precos", "Inflação em 12 meses por item", charts.items_inflation_chart(self.items)))
+            out.append(("precos", "O que custava R$ 100 em dez/2019", charts.real_cost_chart(self.items)))
         rows = []
         for a, name, fig in out:
             if area not in (None, "tudo", a):
@@ -185,6 +225,26 @@ def build_context(results: dict[str, FetchResult]) -> DataContext:
             ctx.series[key] = _annual_series(ctx.sec, key)
             q = ctx.sec[(ctx.sec["indicador"] == key) & (ctx.sec["uf"] == "BR")]["qualidade"]
             ctx.quality[key] = "oficial" if len(q) and (q == "oficial").all() else "aproximado"
+    anp_res, items_res = results.get("anp_gasolina"), results.get("ipca_itens")
+    if anp_res is not None and anp_res.ok:
+        ctx.anp = anp_res.df
+        ctx.series["gasolina_brasil"] = anp_res.df[anp_res.df["uf"] == "BR"][["date", "value"]].reset_index(drop=True)
+    if items_res is not None and items_res.ok:
+        from src.transformation.metrics import split_items
+        ctx.items = items_res.df
+        for item_key, item_df in split_items(items_res.df).items():
+            if item_key != "geral":
+                ctx.series[f"ipca_item_{item_key}_12m"] = accumulated_12m(item_df).dropna()
+    anp_res, items_res = results.get("anp_gasolina"), results.get("ipca_itens")
+    if anp_res is not None and anp_res.ok:
+        ctx.anp = anp_res.df
+        ctx.series["gasolina_brasil"] = anp_res.df[anp_res.df["uf"] == "BR"][["date", "value"]].reset_index(drop=True)
+    if items_res is not None and items_res.ok:
+        from src.transformation.metrics import split_items
+        ctx.items = items_res.df
+        for item_key, item_df in split_items(items_res.df).items():
+            if item_key != "geral":
+                ctx.series[f"ipca_item_{item_key}_12m"] = accumulated_12m(item_df).dropna()
     for key in CATALOG:
         ctx.quality.setdefault(key, "oficial")
     ctx.raw = {

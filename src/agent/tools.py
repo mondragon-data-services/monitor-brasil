@@ -16,6 +16,7 @@ import pandas as pd
 
 from src.agent.context import AREAS, CATALOG, DataContext
 from src.config import EXPLAINERS
+from src.transformation.metrics import value_days_ago
 
 MAX_POINTS = 60
 MAX_TOOL_OUTPUT_CHARS = 12000
@@ -27,7 +28,7 @@ _EXPLAINER_OF_KEY = {
     "ipca_12m": "inflacao", "ipca_alimentacao_12m": "inflacao", "selic_meta": "divida_juros", "juro_real": "divida_juros",
     "divida_bruta": "divida_juros", "divida_liquida": "divida_juros", "desocupacao": "desemprego",
     "subutilizacao": "desemprego", "rendimento_real": "renda_endividamento", "endividamento_familias": "renda_endividamento",
-    "pib_4tri": "recessao", "pib_trimestral": "recessao", "ibcbr_12m": "recessao", "mvi_taxa": "mvi",
+    "pib_4tri": "recessao", "pib_trimestral": "recessao", "ibcbr_12m": "recessao", "mvi_taxa": "mvi", "gasolina_brasil": "gasolina",
     "feminicidio_total": "vulneraveis", "estupro_vulneravel_total": "vulneraveis", "ideb_anos_iniciais": "ideb",
     "ideb_anos_finais": "ideb", "ideb_ensino_medio": "ideb", "abandono_ensino_medio": "evasao", "nem_nem": "evasao",
 }
@@ -59,6 +60,8 @@ def _when(row: pd.Series, freq: str) -> str:
     d: pd.Timestamp = row["date"]
     if freq == "anual":
         return str(d.year)
+    if freq == "semanal":
+        return d.strftime("%Y-%m-%d")
     label = row.get("period_label") if hasattr(row, "get") else None
     if isinstance(label, str) and label:
         return label
@@ -128,7 +131,7 @@ def list_indicators(ctx: DataContext, **_: Any) -> dict[str, Any]:
 
 
 def get_overview(ctx: DataContext, area: str = "tudo", **_: Any) -> dict[str, Any]:
-    keys = [k for k, v in CATALOG.items() if area in ("tudo", v.area)]
+    keys = [k for k, v in CATALOG.items() if (area == "tudo" and v.core) or area == v.area]
     snaps = []
     for k in keys:
         s = _snapshot(ctx, k)
@@ -198,13 +201,71 @@ def get_security_by_uf(ctx: DataContext, metric: str = "mvi_taxa", uf: str | Non
             "ranking_decrescente": [{"uf": r.uf, "valor": _num(r.valor)} for r in snap.itertuples()]}
 
 
+def get_fuel_by_uf(ctx: DataContext, uf: str | None = None, **_: Any) -> dict[str, Any]:
+    """Gasolina comum (ANP): ranking dos estados na última semana, ou a série recente de uma UF contra o Brasil."""
+    anp = ctx.anp
+    if anp.empty:
+        return {"erro": "preços de gasolina indisponíveis"}
+    week = anp["date"].max()
+    ufs = sorted(u for u in anp["uf"].unique() if u != "BR")
+    br = anp[anp["uf"] == "BR"].sort_values("date")
+    br_now = br[br["date"] == week]["value"]
+    if uf:
+        uf = uf.upper()
+        if uf not in ufs:
+            return {"erro": f"UF inválida. Use uma de: {', '.join(ufs)}"}
+        own = anp[anp["uf"] == uf].sort_values("date")
+        last_52 = own.tail(53)
+        return {"unidade": "R$/litro", "produto": "gasolina comum", "uf": uf, "semana_encerrada_em": str(week.date()),
+                "preco_atual": _num(own.iloc[-1]["value"]), "preco_brasil": _num(br_now.iloc[0]) if len(br_now) else None,
+                "preco_ha_12_meses": _num(value_days_ago(own, 365)), "postos_pesquisados": _num(own.iloc[-1].get("postos"), 0),
+                "ultimas_semanas": [{"semana": str(r.date.date()), "valor": _num(r.value)} for r in own.tail(8).itertuples()],
+                "minimo_52_semanas": _num(last_52["value"].min()), "maximo_52_semanas": _num(last_52["value"].max())}
+    snap = anp[(anp["date"] == week) & (anp["uf"] != "BR")].sort_values("value", ascending=False)
+    return {"unidade": "R$/litro", "produto": "gasolina comum", "semana_encerrada_em": str(week.date()),
+            "brasil": _num(br_now.iloc[0]) if len(br_now) else None, "brasil_ha_12_meses": _num(value_days_ago(br, 365)),
+            "ranking_decrescente": [{"uf": r.uf, "preco": _num(r.value)} for r in snap.itertuples()]}
+
+
+def get_price_ranking(ctx: DataContext, **_: Any) -> dict[str, Any]:
+    """Inflação do dia a dia: itens do IPCA ordenados pela alta em 12 meses + o que R$ 100 de dez/2019 viraram."""
+    from src.config import IPCA_ITEMS
+    from src.transformation.metrics import accumulated_12m, cumulative_index, split_items
+    if ctx.items.empty:
+        return {"erro": "inflação por item indisponível"}
+    per_item = split_items(ctx.items)
+    rows = []
+    for key, d in per_item.items():
+        acc = accumulated_12m(d).dropna()
+        if acc.empty:
+            continue
+        rows.append({"item": IPCA_ITEMS[key].label, "chave": key, "acumulado_12m_pct": _num(acc.iloc[-1]["value"], 1),
+                     "mes_mais_recente": acc.iloc[-1]["date"].strftime("%Y-%m"),
+                     "variacao_no_mes_pct": _num(d.iloc[-1]["value"], 2),
+                     "r100_de_dez2019_viraram": _num(cumulative_index(d)["value"].iloc[-1], 0)})
+    geral = next((r for r in rows if r["chave"] == "geral"), None)
+    items = sorted((r for r in rows if r["chave"] != "geral"), key=lambda r: -(r["acumulado_12m_pct"] or 0))
+    for r in items:
+        r.pop("chave")
+    out: dict[str, Any] = {"ipca_geral_12m_pct": geral["acumulado_12m_pct"] if geral else None,
+                           "ipca_geral_r100_viraram": geral["r100_de_dez2019_viraram"] if geral else None,
+                           "itens_do_maior_para_o_menor_aumento": items,
+                           "observacao": "O IBGE publica variação de preços, não o preço em reais dos alimentos. "
+                                         "Carne moída não existe no IPCA: use acém/patinho como referência."}
+    if "gasolina_brasil" in ctx.series and not ctx.series["gasolina_brasil"].empty:
+        g = ctx.series["gasolina_brasil"]
+        out["gasolina_preco_litro_brasil"] = {"semana": str(g.iloc[-1]["date"].date()), "valor": _num(g.iloc[-1]["value"]),
+                                              "ha_12_meses": _num(value_days_ago(g, 365))}
+    return out
+
+
 def explain_topic(ctx: DataContext, topic: str, **_: Any) -> dict[str, Any]:
     if topic == "metodologia":
         return {"metodologia": METHODOLOGY}
     if topic == "qualidade_dos_dados":
         return {"qualidade": QUALITY_NOTE, "por_indicador": ctx.quality, "atualizacao_das_fontes": ctx.freshness}
     ind = CATALOG[topic]
-    ex = EXPLAINERS.get(_EXPLAINER_OF_KEY.get(topic, ""))
+    ex = EXPLAINERS.get(_EXPLAINER_OF_KEY.get(topic) or ("precos_itens" if topic.startswith("ipca_item_") else ""))
     out: dict[str, Any] = {"indicador": topic, "nome": ind.label, "unidade": ind.unit, "descricao": ind.description,
                            "fonte": ind.source}
     if ex:
@@ -239,11 +300,17 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     _fn("get_security_by_uf", "Segurança pública por estado (UF): ranking de um ano ou série de uma UF contra o Brasil.",
         {"metric": {"type": "string", "enum": list(UF_METRICS)}, "uf": {"type": ["string", "null"]},
          "year": {"type": ["integer", "null"]}}, ["metric", "uf", "year"]),
+    _fn("get_fuel_by_uf", "Preço da gasolina comum por litro (ANP): ranking de todos os estados na última semana, ou a série "
+        "recente de UMA UF (sigla de 2 letras) contra a média do Brasil. Use para 'preço da gasolina em SP/por estado'.",
+        {"uf": {"type": ["string", "null"]}}, ["uf"]),
+    _fn("get_price_ranking", "Inflação do dia a dia: todos os itens (arroz, feijão, tomate, frango, carne, leite, café, pão, "
+        "gasolina...) ordenados pela alta em 12 meses, quanto R$ 100 de dez/2019 viraram, e o preço da gasolina. Use para "
+        "'qual alimento subiu mais?', 'inflação do prato' ou 'como estão os preços?'.", {}, []),
     _fn("explain_topic", "Explicação em linguagem simples de um indicador, da metodologia ou da qualidade dos dados.",
         {"topic": {"type": "string", "enum": [*_KEYS, "metodologia", "qualidade_dos_dados"]}}, ["topic"]),
 ]
 TOOLS = {f.__name__: f for f in (list_indicators, get_overview, get_indicator_snapshot, get_time_series,
-                                 get_security_by_uf, explain_topic)}
+                                 get_security_by_uf, get_fuel_by_uf, get_price_ranking, explain_topic)}
 _ENUMS: dict[str, dict[str, set]] = {
     "get_overview": {"area": {"tudo", *AREAS}}, "get_indicator_snapshot": {"indicator": set(_KEYS)},
     "get_time_series": {"indicator": set(_KEYS), "aggregate": {"annual_last", None}},

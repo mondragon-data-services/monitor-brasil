@@ -100,6 +100,61 @@ SIDRA_TABLES: dict[str, SidraTable] = {
     )
 }
 
+# --------------------------------------------------------------------------- #
+# Preços do dia a dia: IPCA por item (IBGE) e gasolina (ANP)
+# --------------------------------------------------------------------------- #
+IPCA_ITEMS_TABLE = 7060  # IPCA — variação mensal por grupo/item/subitem (série desde jan/2020)
+IPCA_ITEMS_URL = f"{_SIDRA}/t/7060/n1/all/v/63/p/all/c315/" + "{codes}"
+
+
+@dataclass(frozen=True)
+class IpcaItem:
+    key: str
+    code: int          # código na classificação c315 da tabela 7060
+    label: str
+    group: str         # "referencia" | "comida" | "combustivel"
+    note: str = ""
+
+
+IPCA_ITEMS: dict[str, IpcaItem] = {
+    i.key: i
+    for i in (
+        IpcaItem("geral", 7169, "IPCA geral", "referencia"),
+        IpcaItem("alimentacao_domicilio", 7171, "Alimentação no domicílio", "referencia", "Supermercado como um todo"),
+        IpcaItem("gasolina", 7657, "Gasolina", "combustivel"),
+        IpcaItem("frango_inteiro", 107617, "Frango inteiro", "comida"),
+        IpcaItem("frango_pedacos", 107618, "Frango em pedaços", "comida"),
+        IpcaItem("carne_acem", 7300, "Carne bovina — acém", "comida", "O IPCA não tem 'carne moída'; acém e patinho são os cortes mais usados para moer"),
+        IpcaItem("carne_patinho", 7295, "Carne bovina — patinho", "comida", "O IPCA não tem 'carne moída'; acém e patinho são os cortes mais usados para moer"),
+        IpcaItem("leite", 12393, "Leite longa vida", "comida"),
+        IpcaItem("cafe", 7392, "Café moído", "comida"),
+        IpcaItem("pao", 7375, "Pão francês", "comida"),
+        IpcaItem("arroz", 7173, "Arroz", "comida"),
+        IpcaItem("feijao_carioca", 12222, "Feijão carioca", "comida"),
+        IpcaItem("feijao_preto", 7176, "Feijão preto", "comida"),
+        IpcaItem("tomate", 7212, "Tomate", "comida"),
+    )
+}
+IPCA_ITEM_BY_CODE: dict[int, str] = {i.code: k for k, i in IPCA_ITEMS.items()}
+BASE_DATE_IPCA_ITEMS = "2019-12"  # o índice acumulado do painel parte de dez/2019 (= 100)
+
+ANP_BASE = ("https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/"
+            "precos-revenda-e-de-distribuicao-combustiveis/shlp/semanal/")
+ANP_URL_BRASIL = ANP_BASE + "semanal-brasil-desde-2013.xlsx"
+ANP_URL_ESTADOS = ANP_BASE + "semanal-estados-desde-2013.xlsx"
+ANP_REFERER = "https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos"
+ANP_PRODUCT = "GASOLINA COMUM"
+ANP_MAX_AGE_DAYS = 3  # a ANP publica 1x por semana; o arquivo (≈13 MB) só é rebaixado se o cache passar disso
+
+UF_BY_ANP_NAME: dict[str, str] = {
+    "ACRE": "AC", "ALAGOAS": "AL", "AMAPA": "AP", "AMAZONAS": "AM", "BAHIA": "BA", "CEARA": "CE",
+    "DISTRITO FEDERAL": "DF", "ESPIRITO SANTO": "ES", "GOIAS": "GO", "MARANHAO": "MA", "MATO GROSSO": "MT",
+    "MATO GROSSO DO SUL": "MS", "MINAS GERAIS": "MG", "PARA": "PA", "PARAIBA": "PB", "PARANA": "PR",
+    "PERNAMBUCO": "PE", "PIAUI": "PI", "RIO DE JANEIRO": "RJ", "RIO GRANDE DO NORTE": "RN",
+    "RIO GRANDE DO SUL": "RS", "RONDONIA": "RO", "RORAIMA": "RR", "SANTA CATARINA": "SC", "SAO PAULO": "SP",
+    "SERGIPE": "SE", "TOCANTINS": "TO",
+}
+
 # Códigos candidatos do Ipeadata (OData). Se a API não devolver linhas, o pipeline
 # usa o consolidado determinístico — veja sinesp_loader.build_consolidated_fallback.
 IPEA_CANDIDATE_SERIES: dict[str, str] = {
@@ -229,6 +284,23 @@ EXPLAINERS: dict[str, Explainer] = {
             "expostos à violência.",
         source_label="INEP — Censo Escolar · IBGE — PNAD Contínua Educação",
         source_url="https://www.gov.br/inep/pt-br/areas-de-atuacao/pesquisas-estatisticas-e-indicadores/censo-escolar",
+    ),
+    "gasolina": Explainer(
+        what="É o preço médio que o motorista paga por litro de gasolina comum no posto, apurado toda semana pela ANP "
+             "em milhares de postos pelo país.",
+        why="A gasolina pesa no orçamento de quem tem carro ou moto e sobe junto no frete: transporte mais caro "
+            "encarece o preço de tudo que chega ao supermercado.",
+        source_label="ANP — Levantamento de Preços de Combustíveis (síntese semanal)",
+        source_url="https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/"
+                   "levantamento-de-precos-de-combustiveis-ultimas-semanas-pesquisadas",
+    ),
+    "precos_itens": Explainer(
+        what="Mostra quanto o preço de cada item subiu nos últimos 12 meses e quanto custa hoje o que custava R$ 100 "
+             "em dezembro de 2019. Vem do IPCA, que o IBGE calcula pesquisando os preços em lojas e mercados.",
+        why="A inflação geral esconde diferenças enormes: o tomate pode disparar enquanto o arroz cai. Aqui você vê a "
+            "inflação do seu prato, não só a média do país.",
+        source_label="IBGE — IPCA por item, SIDRA tabela 7060",
+        source_url="https://sidra.ibge.gov.br/tabela/7060",
     ),
 }
 

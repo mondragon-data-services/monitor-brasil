@@ -41,6 +41,8 @@ Planilha Sinesp (data/raw ou upload) ─┘                    (cache em disco) 
 | `pib_4tri` | IBGE SIDRA | tabela 5932 / var 6562 | % (acum. 4 tri) |
 | `pib_trimestral` | IBGE SIDRA | tabela 5932 / var 6564 | % (tri/tri dessaz.) |
 | `seguranca_educacao` | Sinesp VDE / FBSP / INEP / IBGE | consolidado | ver abaixo |
+| `anp_gasolina` | ANP — síntese semanal de preços (Brasil + 27 UFs) | `semanal-brasil/estados-desde-2013.xlsx` | R$/litro (gasolina comum), semanal |
+| `ipca_itens` | IBGE SIDRA | tabela 7060 / var 63 | variação mensal % por item (desde jan/2020) |
 
 Indicadores do consolidado (`seguranca_educacao_consolidado.parquet`): `mvi_taxa`, `mvi_total`, `feminicidio_total`,
 `feminicidio_taxa`, `estupro_vulneravel_total`, `ideb_*` e `ideb_meta_*` (anos iniciais/finais/ensino médio),
@@ -48,6 +50,17 @@ Indicadores do consolidado (`seguranca_educacao_consolidado.parquet`): `mvi_taxa
 
 Métricas (`src/transformation/metrics.py`): acumulado 12m por juros compostos, juro real (Fisher), taxa por 100 mil hab.,
 média móvel, variação YoY em p.p. e detector de recessão técnica (2 trimestres negativos).
+
+## 🛒 Preços do dia a dia (aba "Preços do Dia a Dia")
+- **Gasolina por estado e Brasil** (R$/litro, semanal): planilhas oficiais da ANP. O arquivo de estados tem ~13 MB, então o
+  resultado fica em `data/processed/anp_gasolina.parquet` e só é rebaixado após 3 dias (a ANP publica 1x por semana); o botão
+  "Forçar atualização" ignora essa validade. O site da ANP exige cabeçalhos de navegador.
+- **Alimentos (frango, carne, leite, café, pão, arroz, feijão, tomate)**: IPCA por item do IBGE (SIDRA 7060). **O IBGE publica a
+  variação de preço, não o preço em reais**; por isso o painel mostra a inflação acumulada em 12 meses, a evolução no tempo e
+  "quanto custa hoje o que custava R$ 100 em dez/2019". Só a gasolina tem preço em reais.
+- **Carne moída** não existe no IPCA: usamos acém e patinho (cortes mais usados para moer). Feijão: carioca e preto. Frango: inteiro
+  e em pedaços.
+- O agente de IA responde sobre esses dados (`get_fuel_by_uf`, `get_price_ranking`) e explica que alimentos só têm variação.
 
 ## ⚠️ Limitações honestas
 - **Segurança pública (Sinesp VDE oficial)**: o botão **⬇️ Baixar Sinesp VDE oficial** (ou

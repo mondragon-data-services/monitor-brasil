@@ -53,7 +53,7 @@ def main() -> int:
             last = str(int(res.df["ano"].max()))
         print(f"{key:<26}{ICON[res.mode]:<14}{len(res.df):>7}  {last}  {res.detail if res.mode != 'live' else ''}")
 
-    essential = [*SGS_SERIES, *SIDRA_TABLES]
+    essential = [*SGS_SERIES, *SIDRA_TABLES, "anp_gasolina", "ipca_itens"]
     missing = [k for k in essential if not results[k].ok]
     files = sorted(p.name for p in DATA_PROCESSED.glob("*.parquet"))
     print(f"\n{len(files)} arquivos Parquet em {DATA_PROCESSED}")

@@ -120,3 +120,31 @@ def latest_with_delta(df: pd.DataFrame, periods: int = 12, value_col: str = "val
     last, prev = clean.iloc[-1], clean.iloc[-1 - periods]
     return Delta(float(last[value_col]), float(prev[value_col]),
                  float(last[value_col] - prev[value_col]), last["date"])
+
+
+# --------------------------------------------------------------------------- #
+# Preços do dia a dia (IPCA por item e gasolina)
+# --------------------------------------------------------------------------- #
+def split_items(items: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """DataFrame longo ``date, item, value`` -> um DataFrame ``date, value`` (variação mensal %) por item."""
+    if items is None or items.empty:
+        return {}
+    return {k: g[["date", "value"]].sort_values("date").reset_index(drop=True) for k, g in items.groupby("item")}
+
+
+def cumulative_index(monthly_var: pd.DataFrame, base: float = 100.0) -> pd.DataFrame:
+    """Número-índice a partir de variações mensais (%): ``base × Π(1 + v/100)``; a base é o mês anterior à 1ª variação."""
+    out = monthly_var.sort_values("date").reset_index(drop=True).copy()
+    out["value"] = base * (1.0 + out["value"] / 100.0).cumprod()
+    return out
+
+
+def value_days_ago(df: pd.DataFrame, days: int = 365, tolerance_days: int = 10, value_col: str = "value") -> float | None:
+    """Valor da observação mais próxima de ``days`` dias antes da última (série semanal/irregular); ``None`` se não houver."""
+    clean = df.dropna(subset=[value_col]).sort_values("date")
+    if clean.empty:
+        return None
+    target = clean["date"].iloc[-1] - pd.Timedelta(days=days)
+    idx = (clean["date"] - target).abs().idxmin()
+    row = clean.loc[idx]
+    return float(row[value_col]) if abs((row["date"] - target).days) <= tolerance_days else None

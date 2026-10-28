@@ -33,7 +33,8 @@ def _code_version() -> str:
 
 
 CODE_VERSION = _code_version()
-SUGGESTIONS = ("Como está a segurança pública?", "Como está o endividamento?", "Como está o PIB?")
+SUGGESTIONS = ("Como está a segurança pública?", "Como está o endividamento?", "Como está o PIB?",
+               "Qual alimento subiu mais?")
 
 
 def _secret(name: str, default: Any = None) -> Any:

@@ -9,6 +9,7 @@ import streamlit as st
 
 from src.config import (
     APP_TITLE,
+    IPCA_ITEMS,
     EXPLAINERS,
     PALETTE,
     PERIOD_OPTIONS,
@@ -16,10 +17,12 @@ from src.config import (
     SIDRA_TABLES,
 )
 from src.agent.ui import open_agent, render_agent_tab, sidebar_agent_button
+from src.ingestion.anp_client import get_anp_gasolina
 from src.ingestion.bcb_client import get_bcb_series
 from src.ingestion.cache import FetchResult
 from src.ingestion.http_client import build_session
 from src.ingestion.ibge_client import get_ibge_series
+from src.ingestion.ipca_itens_client import get_ipca_items
 from src.ingestion.sinesp_download import sync_sinesp_vde
 from src.ingestion.sinesp_loader import get_security_education, process_upload
 from src.transformation.metrics import (
@@ -65,12 +68,18 @@ def load_everything() -> dict[str, FetchResult]:
     jobs = {**{k: (get_bcb_series, k) for k in SGS_SERIES}, **{k: (get_ibge_series, k) for k in SIDRA_TABLES}}
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {k: pool.submit(fn, key, None, build_session()) for k, (fn, key) in jobs.items()}
+        futures["anp_gasolina"] = pool.submit(get_anp_gasolina, None, build_session())
+        futures["ipca_itens"] = pool.submit(get_ipca_items, None, build_session())
         out: dict[str, FetchResult] = {k: f.result() for k, f in futures.items()}
     out["seguranca_educacao"] = load_security()
     return out
 
 
 def refresh_all() -> None:
+    try:
+        get_anp_gasolina(force=True)  # o cache em disco da ANP tem validade; "forçar" precisa ignorá-la
+    except Exception:
+        pass
     st.cache_data.clear()
     st.rerun()
 
@@ -78,8 +87,13 @@ def refresh_all() -> None:
 # --------------------------------------------------------------------------- #
 # Sidebar
 # --------------------------------------------------------------------------- #
+def _effective_mode(r: FetchResult) -> str:
+    """Cache dentro da validade (fonte que atualiza 1x por semana) conta como ao vivo."""
+    return "live" if r.mode == "cache" and r.detail.startswith("cache válido") else r.mode
+
+
 def status_badge(label: str, results: list[FetchResult]) -> str:
-    modes = {r.mode for r in results}
+    modes = {_effective_mode(r) for r in results}
     synced = [r.synced_at for r in results if r.synced_at]
     when = max(synced).strftime("%d/%m %H:%M") if synced else ""
     if modes == {"live"}:
@@ -113,6 +127,7 @@ with st.sidebar:
     st.markdown(
         status_badge("Banco Central", [data[k] for k in SGS_SERIES]) + "<br>"
         + status_badge("IBGE", [data[k] for k in SIDRA_TABLES]) + "<br>"
+        + status_badge("Preços (ANP/IBGE)", [data["anp_gasolina"], data["ipca_itens"]]) + "<br>"
         + sinesp_badge(data["seguranca_educacao"]),
         unsafe_allow_html=True,
     )
@@ -154,7 +169,8 @@ option = PERIOD_OPTIONS[period_label]
 start = period_start(option)
 
 # Aviso discreto quando algo veio do cache em disco
-stale = [(k, r) for k, r in data.items() if r.mode == "cache" and r.synced_at and k != "seguranca_educacao"]
+stale = [(k, r) for k, r in data.items()
+         if r.mode == "cache" and r.synced_at and k != "seguranca_educacao" and _effective_mode(r) != "live"]
 if stale and "toast_shown" not in st.session_state:
     last = max(r.synced_at for _, r in stale)
     st.toast(f"API do governo indisponível para {len(stale)} fonte(s). Usando cache local de {last:%d/%m/%Y %H:%M}.", icon="⚠️")
@@ -289,8 +305,9 @@ with k5:
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["💰 Inflação, Juros e Risco Fiscal", "👷 Emprego, Renda e Recessão",
-                                        "🚨 Segurança e Vulneráveis", "🎓 Educação e Futuro", "🤖 Agente Monitora Brasil"])
+tab1, tab2, tab3, tab4, tab_prices, tab5 = st.tabs([
+    "💰 Inflação, Juros e Risco Fiscal", "👷 Emprego, Renda e Recessão", "🚨 Segurança e Vulneráveis",
+    "🎓 Educação e Futuro", "🛒 Preços do Dia a Dia", "🤖 Agente Monitora Brasil"])
 
 # --------------------------- Aba 1 ------------------------------------------ #
 with tab1:
@@ -353,7 +370,38 @@ with tab4:
     data_section("educacao", {"Educação (consolidado)": sec[sec["indicador"].str.contains("ideb|abandono|nem_nem")]
                               if not sec.empty else sec})
 
-# --------------------------- Aba 5 ------------------------------------------ #
+# --------------------------- Aba Preços do dia a dia ------------------------ #
+with tab_prices:
+    anp, items = df("anp_gasolina"), df("ipca_itens")
+    st.markdown("### ⛽ Gasolina: preço por litro, por estado e no Brasil")
+    gas_ufs = sorted(u for u in anp["uf"].unique() if u != "BR") if not anp.empty else []
+    gas_uf = st.selectbox("Estado", ["BR"] + gas_ufs, format_func=lambda x: "Brasil" if x == "BR" else x, key="gas_uf")
+    plot(charts.gasoline_chart(anp, gas_uf, start, show_events), "gasolina_serie")
+    plot(charts.gasoline_ranking_chart(anp, None if gas_uf == "BR" else gas_uf), "gasolina_ranking")
+    explainer("gasolina")
+
+    st.markdown("### 🛒 Inflação do prato e do tanque: item por item")
+    st.caption("O IBGE publica a **variação** do preço de cada item (não o preço em reais). Por isso mostramos quanto "
+               "cada item subiu — e quanto custa hoje o que custava R$ 100 em dezembro de 2019.")
+    plot(charts.items_inflation_chart(items), "itens_12m")
+    plot(charts.real_cost_chart(items), "itens_custo")
+    options = [k for k, v in IPCA_ITEMS.items() if v.group != "referencia" or k == "alimentacao_domicilio"]
+    chosen = st.multiselect("Itens para comparar no tempo", options, default=["tomate", "cafe", "arroz", "carne_acem"],
+                            format_func=lambda k: IPCA_ITEMS[k].label, key="itens_sel")
+    plot(charts.items_timeline_chart(items, chosen, start, show_events), "itens_tempo")
+    st.caption("ℹ️ O IPCA não tem 'carne moída': usamos acém e patinho, os cortes mais comuns para moer. "
+               "Feijão: carioca (o mais consumido) e preto. Frango: inteiro e em pedaços.")
+    explainer("precos_itens")
+    from src.transformation.metrics import split_items as _split_items
+    acc_long = pd.concat([accumulated_12m(d).dropna().assign(item=k) for k, d in _split_items(items).items()],
+                         ignore_index=True) if not items.empty else items
+    data_section("precos", {
+        "Gasolina comum ANP (R$/litro, semanal)": filter_period(anp, option),
+        "IPCA por item — variação mensal (%)": filter_period(items, option),
+        "IPCA por item — acumulado 12m (%)": filter_period(acc_long, option) if not items.empty else acc_long,
+    })
+
+# --------------------------- Aba Agente ------------------------------------- #
 with tab5:
     render_agent_tab(data)
 

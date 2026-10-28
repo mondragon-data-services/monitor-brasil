@@ -4,11 +4,14 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 
-from src.config import PALETTE
+from src.config import IPCA_ITEMS, PALETTE
 from src.transformation.metrics import (
     accumulated_12m,
+    cumulative_index,
     detect_recession,
     latest_with_delta,
+    split_items,
+    value_days_ago,
     yoy_change_pp,
 )
 from src.visualization.theme import (
@@ -338,3 +341,164 @@ def yoy_text(df: pd.DataFrame, periods: int) -> str:
     """Texto curto de variação p.p. contra o mesmo período do ano anterior."""
     diff = yoy_change_pp(df, periods).dropna()
     return br_pp(float(diff.iloc[-1])) if not diff.empty else "—"
+
+
+# --------------------------------------------------------------------------- #
+# Preços do dia a dia — gasolina (ANP) e itens do IPCA (IBGE)
+# --------------------------------------------------------------------------- #
+_ITEM_COLORS = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#8C6D31", "#4A5568"]  # daltonismo-safe
+
+
+def _gas(anp: pd.DataFrame, uf: str) -> pd.DataFrame:
+    return anp[anp["uf"] == uf].sort_values("date")
+
+
+def gasoline_chart(anp: pd.DataFrame, uf: str = "BR", start: pd.Timestamp | None = None, show_events: bool = False) -> go.Figure:
+    br_all = _gas(anp, "BR") if not anp.empty else anp
+    if br_all.empty:
+        return empty_figure("Preço da gasolina indisponível.")
+    br_df = br_all[br_all["date"] >= start] if start is not None else br_all
+    last = br_all.iloc[-1]
+    ago = value_days_ago(br_all, 365)
+    chg = f", {br_pct((last['value'] / ago - 1) * 100, 1, signed=True)} em 12 meses" if ago else ""
+    sub = f"Média semanal dos postos pesquisados pela ANP — semana encerrada em {last['date']:%d/%m/%Y}"
+    fig = go.Figure()
+    if uf == "BR":
+        title = f"Gasolina comum custa {br_money(last['value'])} por litro no Brasil{chg}"
+    else:
+        own_all = _gas(anp, uf)
+        if own_all.empty:
+            return empty_figure(f"Sem preços de gasolina para {uf}.")
+        o = own_all.iloc[-1]
+        diff = o["value"] - last["value"]
+        title = (f"Em {uf} a gasolina custa {br_money(o['value'])} o litro, {br_money(abs(diff))} "
+                 f"{'acima' if diff > 0 else 'abaixo'} da média do Brasil ({br_money(last['value'])})")
+        own = own_all[own_all["date"] >= start] if start is not None else own_all
+        fig.add_trace(_line(own["date"], own["value"], uf, PALETTE.alert, "R$ %{y:.2f}", width=3))
+    fig.add_trace(_line(br_df["date"], br_df["value"], "Brasil", PALETTE.institutional if uf == "BR" else PALETTE.neutral,
+                        "R$ %{y:.2f}", width=3 if uf == "BR" else 2, dash=None if uf == "BR" else "dash"))
+    fig.update_yaxes(tickprefix="R$ ", tickformat=".2f")
+    if show_events and not br_df.empty:
+        add_events(fig, br_df["date"].min(), br_df["date"].max())
+    return base_layout(fig, title, sub)
+
+
+def gasoline_ranking_chart(anp: pd.DataFrame, highlight: str | None = None) -> go.Figure:
+    states = anp[anp["uf"] != "BR"] if not anp.empty else anp
+    if states.empty:
+        return empty_figure("Comparativo por estado indisponível.")
+    week = states["date"].max()
+    snap = states[states["date"] == week].sort_values("value")
+    nat = _gas(anp, "BR")
+    nat_val = nat[nat["date"] == week]["value"]
+    ref = float(nat_val.iloc[0]) if len(nat_val) else float(snap["value"].median())
+    top, low = snap.iloc[-1], snap.iloc[0]
+    colors = [PALETTE.alert if u == highlight else PALETTE.vulnerable if v >= ref else "rgba(74,85,104,0.55)"
+              for u, v in zip(snap["uf"], snap["value"], strict=True)]
+    title = (f"Gasolina é mais cara no {top['uf']} ({br_money(top['value'])}) e mais barata no {low['uf']} "
+             f"({br_money(low['value'])}): {br_money(top['value'] - low['value'])} de diferença por litro")
+    fig = go.Figure(go.Bar(x=snap["value"], y=snap["uf"], orientation="h", marker_color=colors,
+                           hovertemplate="%{y}: R$ %{x:.2f} por litro<extra></extra>"))
+    if len(nat_val):
+        fig.add_vline(x=ref, line_dash="dash", line_color=PALETTE.institutional,
+                      annotation_text=f"Brasil {br_money(ref)}", annotation_position="top")
+    fig.update_layout(hovermode="closest", yaxis=dict(type="category"))
+    fig.update_xaxes(showgrid=True, gridcolor=PALETTE.grid, tickprefix="R$ ", tickformat=".2f",
+                     range=[max(0, snap["value"].min() - 0.6), snap["value"].max() + 0.3])
+    fig.update_yaxes(showgrid=False)
+    return base_layout(fig, title, f"Preço médio de revenda por estado — semana encerrada em {week:%d/%m/%Y}", height=720, wrap=52)
+
+
+def _items_last_12m(items: pd.DataFrame) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    rows = []
+    last_date = None
+    for key, df in split_items(items).items():
+        acc = accumulated_12m(df).dropna()
+        if not acc.empty:
+            rows.append({"key": key, "label": IPCA_ITEMS[key].label, "group": IPCA_ITEMS[key].group,
+                         "value": acc.iloc[-1]["value"]})
+            last_date = acc.iloc[-1]["date"] if last_date is None else max(last_date, acc.iloc[-1]["date"])
+    return pd.DataFrame(rows), last_date
+
+
+def items_inflation_chart(items: pd.DataFrame) -> go.Figure:
+    table, last_date = _items_last_12m(items)
+    if table.empty or "geral" not in set(table["key"]):
+        return empty_figure("Inflação por item indisponível.")
+    geral = float(table[table["key"] == "geral"]["value"].iloc[0])
+    bars = table[table["key"] != "geral"].sort_values("value")
+    foods = bars[bars["group"] != "referencia"]
+    above = int((foods["value"] > geral).sum())
+    top = foods.iloc[-1]
+    colors = [PALETTE.neutral if g == "referencia" else PALETTE.alert if v > geral else PALETTE.good
+              for g, v in zip(bars["group"], bars["value"], strict=True)]
+    title = (f"{top['label']} lidera a alta em 12 meses ({br_pct(top['value'], 1, signed=True)}); "
+             f"{above} de {len(foods)} itens sobem mais que o IPCA geral ({br_pct(geral, 2)})")
+    fig = go.Figure(go.Bar(x=bars["value"], y=bars["label"], orientation="h", marker_color=colors,
+                           hovertemplate="%{y}: %{x:.1f}% em 12 meses<extra></extra>"))
+    fig.add_vline(x=geral, line_dash="dash", line_color=PALETTE.institutional,
+                  annotation_text=f"IPCA geral {br_pct(geral, 2)}", annotation_position="top")
+    fig.update_layout(hovermode="closest", yaxis=dict(type="category"))
+    fig.update_xaxes(showgrid=True, gridcolor=PALETTE.grid, ticksuffix="%", zeroline=True, zerolinecolor=PALETTE.neutral)
+    fig.update_yaxes(showgrid=False)
+    mes = f"{last_date:%m/%Y}" if last_date is not None else ""
+    return base_layout(fig, title, f"Inflação acumulada em 12 meses até {mes}. Vermelho = acima do IPCA geral · verde = abaixo",
+                       height=560)
+
+
+def real_cost_chart(items: pd.DataFrame) -> go.Figure:
+    rows = []
+    for key, df in split_items(items).items():
+        if not df.empty:
+            rows.append({"key": key, "label": IPCA_ITEMS[key].label, "group": IPCA_ITEMS[key].group,
+                         "value": float(cumulative_index(df)["value"].iloc[-1]), "date": df["date"].max()})
+    table = pd.DataFrame(rows)
+    if table.empty or "geral" not in set(table["key"]):
+        return empty_figure("Custo acumulado por item indisponível.")
+    geral = float(table[table["key"] == "geral"]["value"].iloc[0])
+    bars = table[table["key"] != "geral"].sort_values("value")
+    foods = bars[bars["group"] != "referencia"]
+    top, low = foods.iloc[-1], foods.iloc[0]
+    colors = [PALETTE.neutral if g == "referencia" else PALETTE.alert if v > geral else PALETTE.good
+              for g, v in zip(bars["group"], bars["value"], strict=True)]
+    title = (f"O que custava R$ 100 em dez/2019 hoje custa R$ {br(geral, 0)} no IPCA geral; "
+             f"{top['label'].lower()} foi o que mais subiu (R$ {br(top['value'], 0)}) e {low['label'].lower()} o que menos (R$ {br(low['value'], 0)})")
+    fig = go.Figure(go.Bar(x=bars["value"], y=bars["label"], orientation="h", marker_color=colors,
+                           hovertemplate="%{y}: R$ 100 viraram R$ %{x:.0f}<extra></extra>"))
+    fig.add_vline(x=geral, line_dash="dash", line_color=PALETTE.institutional,
+                  annotation_text=f"IPCA geral: R$ {br(geral, 0)}", annotation_position="top")
+    fig.update_layout(hovermode="closest", yaxis=dict(type="category"))
+    fig.update_xaxes(showgrid=True, gridcolor=PALETTE.grid, tickprefix="R$ ", range=[90, bars["value"].max() * 1.06])
+    fig.update_yaxes(showgrid=False)
+    return base_layout(fig, title, f"Valor hoje de uma compra que custava R$ 100 em dezembro de 2019 (até {table['date'].max():%m/%Y})",
+                       height=560, wrap=85)
+
+
+def items_timeline_chart(items: pd.DataFrame, keys: list[str], start: pd.Timestamp | None = None,
+                         show_events: bool = False) -> go.Figure:
+    per_item = split_items(items)
+    if not per_item or "geral" not in per_item:
+        return empty_figure("Série de inflação por item indisponível.")
+    fig = go.Figure()
+    summary: list[tuple[str, float]] = []
+    chosen = [k for k in keys if k in per_item and k != "geral"]
+    for i, key in enumerate(chosen):
+        acc = accumulated_12m(per_item[key]).dropna()
+        acc = acc[acc["date"] >= start] if start is not None else acc
+        if acc.empty:
+            continue
+        fig.add_trace(_line(acc["date"], acc["value"], IPCA_ITEMS[key].label, _ITEM_COLORS[i % len(_ITEM_COLORS)], "%{y:.1f}%"))
+        summary.append((IPCA_ITEMS[key].label, float(acc.iloc[-1]["value"])))
+    g = accumulated_12m(per_item["geral"]).dropna()
+    g = g[g["date"] >= start] if start is not None else g
+    if g.empty or not summary:
+        return empty_figure("Selecione itens com dados no período.")
+    fig.add_trace(_line(g["date"], g["value"], "IPCA geral", PALETTE.neutral, "%{y:.1f}%", width=2.2, dash="dash"))
+    fig.add_hline(y=0, line_color=PALETTE.grid, line_width=1)
+    top = max(summary, key=lambda t: t[1])
+    title = (f"{top[0]} tem a maior alta entre os itens escolhidos: {br_pct(top[1], 1, signed=True)} em 12 meses "
+             f"(IPCA geral: {br_pct(float(g.iloc[-1]['value']), 2)})")
+    fig.update_yaxes(ticksuffix="%")
+    if show_events:
+        add_events(fig, g["date"].min(), g["date"].max())
+    return base_layout(fig, title, "Inflação acumulada em 12 meses de cada item (juros compostos sobre o IPCA mensal do IBGE)")

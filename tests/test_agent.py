@@ -57,7 +57,7 @@ def test_snapshot_numbers_are_computed_in_code(ctx):
 def test_overview_has_chart_headlines_and_recession(ctx):
     out = json.loads(run_tool(ctx, "get_overview", '{"area": "tudo"}'))
     assert out["manchetes_dos_graficos"] and "status_recessao_tecnica" in out
-    assert {i["indicador"] for i in out["indicadores"]} == set(CATALOG)
+    assert {i["indicador"] for i in out["indicadores"]} == {k for k, v in CATALOG.items() if v.core}
 
 
 def test_time_series_caps_points_and_aggregates(ctx):

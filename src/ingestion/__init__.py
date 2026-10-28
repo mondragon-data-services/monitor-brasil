@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from src.config import IPEA_CANDIDATE_SERIES, SGS_SERIES, SIDRA_TABLES
+from src.ingestion.anp_client import get_anp_gasolina
 from src.ingestion.bcb_client import get_bcb_series
 from src.ingestion.cache import FetchResult
 from src.ingestion.http_client import build_session
 from src.ingestion.ibge_client import get_ibge_series
+from src.ingestion.ipca_itens_client import get_ipca_items
 from src.ingestion.ipea_client import get_ipea_series
 from src.ingestion.sinesp_loader import get_security_education
 
@@ -21,6 +23,8 @@ def sync_all(include_ipea: bool = True) -> dict[str, FetchResult]:
         results[key] = get_bcb_series(key, session=session)
     for key in SIDRA_TABLES:
         results[key] = get_ibge_series(key, session=session)
+    results["anp_gasolina"] = get_anp_gasolina(session=session)
+    results["ipca_itens"] = get_ipca_items(session=session)
     if include_ipea:
         for key, code in IPEA_CANDIDATE_SERIES.items():
             results[f"ipea_{key}"] = get_ipea_series(key, code, session=session)

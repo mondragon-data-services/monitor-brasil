@@ -33,6 +33,11 @@ educação (INEP). Especificação original: `docs/meta_prompt_monitor_brasil_mv
    foto de um ano ou com planilha Sinesp enviada.
 8. Sem `TODO`/`pass` em código entregue; type hints em todas as funções.
 
+## Preços do dia a dia
+- Gasolina: ANP (`ingestion/anp_client.py`), cache com validade de 3 dias; alimentos: IPCA por item (`ipca_itens_client.py`,
+  SIDRA 7060). O IBGE só dá VARIAÇÃO — nunca apresentar como preço em reais. Códigos dos itens em `config.IPCA_ITEMS`.
+- Itens novos do agente com `core=False` ficam fora da visão geral (mantém o contexto enxuto).
+
 ## Divergências conhecidas do meta-prompt (APIs reais, verificadas em 26/10/2026)
 - Subutilização: tabela **6441** v4118 (a 6438/v4118 devolve HTTP 400).
 - PIB: além da 6562 (acum. 4 tri), usamos 6564 (trimestre/trimestre dessaz.) para o detector de recessão.
